@@ -1,9 +1,13 @@
 import os
+# -------------------------------------------------------
+# 🔥 核心修复：使用国内镜像加速下载 HuggingFace 模型
+# -------------------------------------------------------
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 import json
 import networkx as nx
 import matplotlib.pyplot as plt
 from openai import OpenAI
-from zai import ZhipuAiClient
+from zhipuai import ZhipuAI  # 注意大小写：包名小写，类名大写
 
 # -------------------------------------------------------
 # 修复 ImportError: 必须在导入 sentence_transformers 之前导入 numpy
@@ -17,7 +21,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 # ==========================================
 API_KEY = "797f9a64b59202a44accbae216ba9596.AfDfJzdZcVDnL4jH"
 
-client = ZhipuAiClient(api_key=API_KEY)
+client = ZhipuAI(api_key=API_KEY)
 
 # ==========================================
 # 全局加载模型 (修复作用域问题)
@@ -25,7 +29,6 @@ client = ZhipuAiClient(api_key=API_KEY)
 print("正在加载 Embedding 模型，首次运行可能需要下载...")
 # 使用一个更小的中文模型，下载更快，效果也不错
 embedding_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-
 # 模拟数据
 RAW_TEXT = """
 1998年长江全流域特大洪水是20世纪以来仅次于1954年的大洪水。
