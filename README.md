@@ -1,4 +1,4 @@
-# # YangtzeDestoryLLM (proto)
+# YangtzeDestoryLLM (proto)
 
 ## 安装
 python -m venv .venv
