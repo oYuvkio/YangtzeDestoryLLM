@@ -1,0 +1,3 @@
+﻿{"id": "event_2020_anhui_flood", "type": "flood", "location": "安徽", "time": "2020-07", "impact": "长江中下游汛情导致多地内涝，农田受损", "cause": "梅雨季异常强降雨", "measure": "三峡库区调度、堤防巡查", "source": "示例"}
+{"id": "event_2022_poyang_drought", "type": "drought", "location": "鄱阳湖", "time": "2022-08", "impact": "枯水位导致通航和渔业受损", "cause": "持续少雨高温", "measure": "调水、限航、抗旱应急", "source": "示例"}
+{"id": "event_2019_wanzhou_landslide", "type": "landslide", "location": "重庆万州", "time": "2019-06", "impact": "滑坡阻断道路，威胁沿江居民", "cause": "持续强降雨诱发", "measure": "人员转移、道路抢修", "source": "示例"}

@@ -1,4 +1,12 @@
+<<<<<<< HEAD
 .idea/
 .vscode/
 __pycache__/
 *.pyc
+=======
+﻿.idea/
+*.iml
+.vscode/
+__pycache__/
+*.pyc
+>>>>>>> 2025_11_19_semantic
