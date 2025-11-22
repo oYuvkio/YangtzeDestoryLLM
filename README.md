@@ -1,7 +1,4 @@
-<<<<<<< HEAD
-# YangtzeDestoryLLM
-=======
-﻿# YangtzeLLM (proto)
+# # YangtzeDestoryLLM (proto)
 
 ## 安装
 python -m venv .venv
@@ -25,4 +22,3 @@ python experiments/eval.py --config configs/demo.yaml
 - 在 kg/llm_stub.py 接入真实 LLM，将 triples 作为上下文，生成最终答案。
 - 扩充 data/processed/sample_events.jsonl 为真实长江灾害样本。
 - 迁移 networkx 原型到 Neo4j 或向量库（FAISS/Milvus）。
->>>>>>> 2025_11_19_semantic
