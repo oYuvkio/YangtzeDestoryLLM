@@ -1,4 +1,6 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()
 # -------------------------------------------------------
 # 🔥 核心修复：使用国内镜像加速下载 HuggingFace 模型
 # -------------------------------------------------------
@@ -21,7 +23,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 # -------------------------------------------------------
 # ⚠️ 请将 "YOUR_GEMINI_API_KEY" 替换为您的有效 Gemini API 密钥
 # -------------------------------------------------------
-GEMINI_API_KEY = "AIzaSyBxYis8tDd6uC7n1C1IpssNmV9Uel7XqrM"
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 genai.configure(api_key=GEMINI_API_KEY)
 
@@ -63,8 +65,8 @@ def extract_knowledge(text):
     """
     print("正在进行知识抽取 (使用 Gemini)...")
     try:
-        # 使用 Gemini-1.5-Flash 模型
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # 使用 Gemini-2.5-Flash 模型
+        model = genai.GenerativeModel('gemini-2.5-flash')
         response = model.generate_content(
             prompt,
             generation_config=genai.types.GenerationConfig(
@@ -170,7 +172,7 @@ def generate_answer(query, graph_context):
     """
     print("正在生成答案 (使用 Gemini)...")
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         response = model.generate_content(
             prompt,
             generation_config=genai.types.GenerationConfig(

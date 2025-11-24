@@ -4,7 +4,7 @@ from rank_bm25 import BM25Okapi
 import jieba
 class BM25Retriever:
     def __init__(self, path: str):
-        rows = [json.loads(l) for l in Path(path).read_text(encoding="utf-8").splitlines() if l.strip()]
+        rows = [json.loads(l) for l in Path(path).read_text(encoding="utf-8-sig").splitlines() if l.strip()]
         self.rows = rows
         corpus = [self._concat(r) for r in rows]
         self.tokens = [jieba.lcut(doc) for doc in corpus]  # 可替换为 jieba.lcut 做中文分词

@@ -17,8 +17,7 @@ class VectorRetriever:
         self.model = SentenceTransformer(model_name, device=device)
         
         # 加载数据
-        self.rows = [json.loads(l) for l in Path(path).read_text(encoding="utf-8").splitlines() if l.strip()]
-        
+        self.rows = [json.loads(l) for l in Path(data_path).read_text(encoding="utf-8-sig").splitlines() if l.strip()]
         # 构建文档库：将实体的各个属性拼成一段文本用于嵌入
         self.corpus = [self._concat(r) for r in self.rows]
         

@@ -3,3 +3,12 @@ qa_path: "data/processed/qa_eval.jsonl"
 top_k: 3
 retriever: "bm25"
 graph_hops: 2
+
+llm:
+  provider: "zhipu" # 可切换 "gemini"
+  model_name: "glm-4.5-flash"
+  temperature: 0.1
+embedding:
+  model_name: "paraphrase-multilingual-MiniLM-L12-v2"
+retriever:
+  top_k: 3

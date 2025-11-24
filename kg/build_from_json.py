@@ -3,7 +3,7 @@ import networkx as nx
 from .schema import RELATIONS
 
 def load_events(path: str):
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         for line in f:
             if line.strip():
                 yield json.loads(line)
