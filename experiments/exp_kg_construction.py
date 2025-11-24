@@ -21,17 +21,30 @@ def run_extraction_experiment():
     print(">>> 开始运行：知识抽取对比实验 (Innovation 1) <<<")
     
     # 1. 准备数据 (这里用模拟数据，后续请替换为读取 data/raw/ 目录下的真实 txt 文件)
-    test_docs = [
-        {
-            "doc_id": "doc_001",
-            "text": "2020年7月，受强降雨影响，安徽省长江干流全线超警。洪水导致芜湖、铜陵等地农作物受灾面积达50万亩。省防指启动I级应急响应。"
-        },
-        {
-            "doc_id": "doc_002",
-            "text": "三峡水库在2022年干旱期间加大了下泄流量，有效缓解了长江中下游的水位下降问题，保障了航运安全。"
-        }
-    ]
-    
+    # test_docs = [
+    #     {
+    #         "doc_id": "doc_001",
+    #         "text": "2020年7月，受强降雨影响，安徽省长江干流全线超警。洪水导致芜湖、铜陵等地农作物受灾面积达50万亩。省防指启动I级应急响应。"
+    #     },
+    #     {
+    #         "doc_id": "doc_002",
+    #         "text": "三峡水库在2022年干旱期间加大了下泄流量，有效缓解了长江中下游的水位下降问题，保障了航运安全。"
+    #     }
+    # ]
+
+    test_docs = []
+
+    raw_data_dir = os.path.join(project_root, "data", "raw")
+    for filename in os.listdir(raw_data_dir):
+        if filename.endswith(".txt"):
+            filepath = os.path.join(raw_data_dir, filename)
+            with open(filepath, "r", encoding="utf-8") as f:
+                text = f.read()
+                test_docs.append({
+                    "doc_id": filename[:-4],  # 去掉 .txt 后缀
+                    "text": text
+                })
+
     # 2. 初始化抽取器
     extractor = KnowledgeExtractor()
     
