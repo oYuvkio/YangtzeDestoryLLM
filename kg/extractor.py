@@ -3,7 +3,7 @@
 # 作用：负责将非结构化文本转化为结构化图谱数据 
 
 import json
-from .llm import chat_with_llm
+from .llm_core import chat_with_llm
 
 from .prompts import EXTRACT_PROMPT_TEMPLATE # 导入提示词模板
 
