@@ -1,4 +1,4 @@
-# 文件路径: main_pipeline.py
+"""演示从知识抽取到 GraphRAG 问答的端到端流程。"""
 import os
 import yaml
 from kg.extractor import KnowledgeExtractor
@@ -16,6 +16,7 @@ RAW_DOC = """
 """
 
 def main():
+    """串联知识抽取、图谱构建与问答的示例入口。"""
     print("="*20 + " 阶段一：基于LLM的知识抽取 (创新点1) " + "="*20)
     extractor = KnowledgeExtractor()
     kg_data = extractor.extract(RAW_DOC)

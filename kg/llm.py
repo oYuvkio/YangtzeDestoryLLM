@@ -1,4 +1,4 @@
-# 文件路径: kg/llm.py
+"""LLM 相关的基础调用与问答辅助函数。"""
 import os
 from zhipuai import ZhipuAI
 
@@ -6,8 +6,9 @@ from zhipuai import ZhipuAI
 API_KEY = "797f9a64b59202a44accbae216ba9596.AfDfJzdZcVDnL4jH"  # 你的Key
 client = ZhipuAI(api_key=API_KEY)
 
+
 def chat_with_llm(prompt: str, system_prompt: str = "你是一个乐于助人的助手。", json_mode: bool = False) -> str:
-    """封装智谱AI调用"""
+    """封装智谱 AI 的对话接口，支持 JSON 模式。"""
     try:
         response = client.chat.completions.create(
             model="glm-4.5-flash",  # 或者 glm-4
@@ -20,24 +21,26 @@ def chat_with_llm(prompt: str, system_prompt: str = "你是一个乐于助人的
         )
         return response.choices[0].message.content
     except Exception as e:
+        # 输出错误信息，方便排查 API Key 或网络配置问题
         print(f"LLM调用失败: {e}")
         return ""
 
+
 def draft_answer(question: str, evidence: list) -> str:
-    """基于检索到的三元组生成答案"""
-    # 将三元组列表转换为文本描述
+    """将三元组证据转换为提示词，并调用 LLM 生成答案。"""
+    # 将三元组列表转换为文本描述，方便模型理解上下文
     facts = "\n".join([f"- {s} {r} {o}" for s, r, o in evidence])
-    
+
     prompt = f"""
     请根据以下检索到的长江灾害领域知识图谱信息，回答用户的问题。
     如果信息不足，请实事求是地说明。
-    
+
     【知识证据】：
     {facts}
-    
+
     【用户问题】：
     {question}
-    
+
     请生成一段连贯、准确的回答，并引用证据中的关键信息。
     """
     return chat_with_llm(prompt, system_prompt="你是一个基于知识图谱的灾害问答专家。")

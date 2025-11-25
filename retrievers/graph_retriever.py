@@ -1,7 +1,9 @@
-﻿import networkx as nx
+import networkx as nx
 from typing import List, Tuple
 
+
 def hop_subgraph(g: nx.DiGraph, center_ids: List[str], hops: int = 2) -> nx.DiGraph:
+    """在图中围绕中心节点进行多跳扩展，返回子图。"""
     nodes = set(center_ids)
     frontier = set(center_ids)
     for _ in range(hops):
@@ -13,7 +15,9 @@ def hop_subgraph(g: nx.DiGraph, center_ids: List[str], hops: int = 2) -> nx.DiGr
         nodes.update(nbrs)
     return g.subgraph(nodes).copy()
 
+
 def format_subgraph(g: nx.DiGraph) -> List[Tuple[str, str, str]]:
+    """将子图边转换为 (主体, 关系, 客体) 形式的三元组列表。"""
     triples = []
     for u, v, data in g.edges(data=True):
         rel = data.get("rel", data.get("label", "related_to"))

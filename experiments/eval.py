@@ -1,8 +1,10 @@
-﻿import json
+import json
 import argparse, yaml
 from retrievers.text_retriever import BM25Retriever
 
+
 def eval_text(cfg):
+    """计算基于 BM25 的问答命中率。"""
     ret = BM25Retriever(cfg["data_path"])
     golds = [json.loads(l) for l in open(cfg["qa_path"], "r", encoding="utf-8").read().splitlines() if l.strip()]
     correct = 0
@@ -14,6 +16,7 @@ def eval_text(cfg):
             correct += 1
     acc = correct / len(golds) if golds else 0.0
     print(f"Text BM25 accuracy: {acc:.2f} ({correct}/{len(golds)})")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
