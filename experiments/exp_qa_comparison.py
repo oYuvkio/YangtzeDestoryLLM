@@ -1,13 +1,14 @@
-from kg.llm_core import LLMFactory
+from kg.llm_core import LLMFactory  # 引入工厂类
 from kg.build_from_json import build_graph
 from retrievers.graph_retriever import hop_subgraph, format_subgraph
 from retrievers.vector_retriever import VectorRetriever
 import sys
 import os
 import json
+import yaml  # 需要 pip install pyyaml
 import pandas as pd  # pip install pandas
 
-# 🔧 添加项目根目录到路径
+# 🔧 路径黑魔法：将项目根目录加入 sys.path，防止 import 报错
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
@@ -15,12 +16,27 @@ sys.path.append(project_root)
 # 导入我们的模块
 
 
-def get_baseline_answer(question, retriever):
+def load_config():
+    """加载配置文件"""
+    config_path = os.path.join(project_root, "configs", "cfg.yaml")
+    try:
+        with open(config_path, "r", encoding="utf-8-sig") as f:
+            return yaml.safe_load(f)
+    except FileNotFoundError:
+        print(f"❌ 配置文件未找到: {config_path}")
+        sys.exit(1)
+
+
+def get_baseline_answer(question, retriever, cfg):
     """
     Baseline 方法: Naive RAG (仅基于向量检索文本)
     """
-    # 1. 检索 Top-3 相关文档
-    hits = retriever.retrieve(question, k=3)
+    # 1. 检索 Top-K 相关文档 (这里 K=3)
+    # 注意：实际项目中 top_k 也可以从 config 读取
+    retriever_cfg = cfg.get("retriever", {})
+    top_k = retriever_cfg.get("top_k", 3)
+
+    hits = retriever.retrieve(question, k=top_k)
     if not hits:
         return "未找到相关信息", []
 
@@ -30,12 +46,13 @@ def get_baseline_answer(question, retriever):
 
     # 3. LLM 生成
     prompt = f"基于以下背景信息回答问题：\n{context_text}\n\n问题：{question}"
-    llm = LLMFactory.create(cfg.llm.provider)
-    answer = chat_with_llm(prompt, system_prompt="你是一个助手。")
+    llm = LLMFactory.create(cfg.get("llm", {}))
+
+    answer = llm.chat(prompt, system_prompt="你是一个基于知识图谱的灾害问答专家。")
     return answer, [h[0] for h in hits]  # 返回答案和检索到的原始数据
 
 
-def get_graphrag_answer(question, vector_retriever, graph):
+def get_graphrag_answer(question, vector_retriever, graph, cfg):
     """
     Ours 方法: GraphRAG (向量检索 + 子图扩展)
     """
@@ -50,8 +67,11 @@ def get_graphrag_answer(question, vector_retriever, graph):
         return "检索到的内容无法定位图节点", []
 
     # 2. 获取 2-hop 子图
-    sub_graph = hop_subgraph(graph, [center_id], hops=2)
+    hops = cfg.get("graph_hops", 2)
+    sub_graph = hop_subgraph(graph, [center_id], hops=hops)
     evidence_triples = format_subgraph(sub_graph)
+    if not evidence_triples:
+        return "未找到相关的图谱路径信息", []
 
     # 3. 格式化三元组证据
     context_text = "\n".join(
@@ -59,8 +79,9 @@ def get_graphrag_answer(question, vector_retriever, graph):
 
     # 4. LLM 生成
     prompt = f"基于以下知识图谱结构化数据回答问题：\n{context_text}\n\n问题：{question}"
-    answer = chat_with_llm(prompt, system_prompt="你是一个基于知识图谱的专家。")
+    llm = LLMFactory.create(cfg.get("llm", {}))
 
+    answer = llm.chat(prompt, system_prompt="你是一个基于知识图谱的灾害问答专家。")
     return answer, evidence_triples
 
 
@@ -68,16 +89,26 @@ def run_qa_experiment():
     """跑通基线与 GraphRAG 的问答对比实验。"""
     print(">>> 开始运行：QA 方法对比实验 (Innovation 2) <<<")
 
+    # 0. 加载配置
+    cfg = load_config()
+    print(f"已加载配置，LLM 提供商: {cfg['llm'].get('provider', 'unknown')}")
+
     # 1. 准备路径
     data_path = os.path.join(project_root, "data",
                              "processed", "sample_events.jsonl")
+
+    if not os.path.exists(data_path):
+        print(f"❌ 数据文件未找到: {data_path}")
+        print("请先运行 experiments/exp_kg_construction.py 生成数据，或检查路径。")
+        return
 
     # 2. 初始化模块
     print("正在初始化检索器和图谱...")
     vector_retriever = VectorRetriever(data_path)  # 你的向量检索器
     kg_graph = build_graph(data_path)             # 你的 NetworkX 图
 
-    # 3. 准备评测问题 (Questons)
+    # 3. 准备评测问题 (Questions)
+    # 建议：这里也可以从 data/processed/qa_eval.jsonl 读取真实问题
     test_questions = [
         "2022年鄱阳湖干旱有什么影响？",
         "安徽2020年洪水的成因是什么？"
@@ -87,14 +118,18 @@ def run_qa_experiment():
 
     # 4. 循环评测
     for q in test_questions:
-        print(f"\n正在评测问题: {q}")
+        print(f"\n--------------------------------------------------")
+        print(f"正在评测问题: {q}")
 
         # --- 跑 Baseline ---
-        base_ans, base_ctx = get_baseline_answer(q, vector_retriever)
+        print("Running Baseline (Naive RAG)...")
+        base_ans, base_ctx = get_baseline_answer(
+            q, vector_retriever, cfg)
 
         # --- 跑 Ours (GraphRAG) ---
+        print("Running GraphRAG...")
         graph_ans, graph_ctx = get_graphrag_answer(
-            q, vector_retriever, kg_graph)
+            q, vector_retriever, kg_graph, cfg)
 
         comparison_results.append({
             "question": q,
@@ -111,6 +146,7 @@ def run_qa_experiment():
     df.to_csv(output_file, index=False, encoding="utf-8-sig")
 
     print(f"\n✅ 对比完成！报表已生成: {output_file}")
+    # 打印预览
     print(df[["question", "baseline_answer", "graphrag_answer"]])
 
 
