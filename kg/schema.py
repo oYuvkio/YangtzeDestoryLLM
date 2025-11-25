@@ -1,4 +1,6 @@
-﻿from dataclasses import dataclass
+﻿# 本体定义（规定了有哪些实体类型和关系）
+
+from dataclasses import dataclass
 from typing import Dict
 
 @dataclass

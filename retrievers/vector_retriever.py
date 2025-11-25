@@ -1,6 +1,8 @@
 # 文件路径: retrievers/vector_retriever.py
 import os
 # 镜像加速
+
+# 核心组件：向量检索（语义匹配）
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 import json
 import torch

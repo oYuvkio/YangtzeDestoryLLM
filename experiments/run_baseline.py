@@ -2,6 +2,7 @@
 from retrievers.text_retriever import BM25Retriever
 from kg.query import GraphRAG
 
+# GraphRAG vs 纯文本检索对比
 def run_text_only(cfg):
     ret = BM25Retriever(cfg["data_path"])
     q = "2022年鄱阳湖干旱的主要影响是什么？"

@@ -2,6 +2,7 @@
 import networkx as nx
 from .schema import RELATIONS
 
+# 内存图构建（NetworkX适配器）
 def load_events(path: str):
     with open(path, "r", encoding="utf-8-sig") as f:
         for line in f:

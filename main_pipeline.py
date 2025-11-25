@@ -7,6 +7,7 @@ from retrievers.vector_retriever import VectorRetriever
 from retrievers.graph_retriever import hop_subgraph, format_subgraph
 from kg.llm import draft_answer
 
+
 # 模拟一段新的原始文本（论文中的非结构化数据来源）
 RAW_DOC = """
 2020年7月，安徽省遭遇了历史罕见的洪涝灾害。
