@@ -92,7 +92,8 @@ class Neo4jAdapter:
 # ================= 测试代码 =================
 if __name__ == "__main__":
     # 请根据实际情况修改密码
-    adapter = Neo4jAdapter(os.getenv("NEO4J_URI"), os.getenv("NEO4J_USER"), os.getenv("NEO4J_PASSWORD"))
+    adapter = Neo4jAdapter(os.getenv("NEO4J_URI"), os.getenv(
+        "NEO4J_USER"), os.getenv("NEO4J_PASSWORD"))
 
     try:
         # 1. 先清空旧数据

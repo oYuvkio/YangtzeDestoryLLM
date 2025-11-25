@@ -10,10 +10,12 @@ class BM25Retriever:
     """基于 BM25 的关键词检索器，用于快速定位相关事件。"""
 
     def __init__(self, path: str):
-        rows = [json.loads(l) for l in Path(path).read_text(encoding="utf-8-sig").splitlines() if l.strip()]
+        rows = [json.loads(l) for l in Path(path).read_text(
+            encoding="utf-8-sig").splitlines() if l.strip()]
         self.rows = rows
         corpus = [self._concat(r) for r in rows]
-        self.tokens = [jieba.lcut(doc) for doc in corpus]  # 可替换为 jieba.lcut 做中文分词
+        self.tokens = [jieba.lcut(doc)
+                       for doc in corpus]  # 可替换为 jieba.lcut 做中文分词
         self.bm25 = BM25Okapi(self.tokens)
 
     @staticmethod
@@ -25,5 +27,6 @@ class BM25Retriever:
         """返回与查询最匹配的前 k 条记录及得分。"""
         # scores = self.bm25.get_scores(query.split())
         scores = self.bm25.get_scores(jieba.lcut(query))
-        idxs = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
+        idxs = sorted(range(len(scores)),
+                      key=lambda i: scores[i], reverse=True)[:k]
         return [(self.rows[i], scores[i]) for i in idxs]

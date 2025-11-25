@@ -25,7 +25,7 @@ class LLMBackend(ABC):
 class ZhipuBackend(LLMBackend):
     """调用智谱 ChatCompletions 接口的实现。"""
 
-    def __init__(self,config:dict):
+    def __init__(self, config: dict):
         api_key = os.getenv("ZHIPU_API_KEY")
         if not api_key:
             raise ValueError("❌ 未找到 ZHIPU_API_KEY，请检查 .env 文件")
@@ -34,6 +34,7 @@ class ZhipuBackend(LLMBackend):
         self.model = config.get("model_name", "glm-4.5-flash")
         self.default_temp = config.get("temperature", 0.1)
     # 实现智谱的调用逻辑
+
     def chat(self, prompt: str, system_prompt: str = None, json_mode: bool = False) -> str:
         messages = [{"role": "user", "content": prompt}]
         if system_prompt:
@@ -41,9 +42,9 @@ class ZhipuBackend(LLMBackend):
 
         try:
             response = self.client.chat.completions.create(
-                model=self.model, 
+                model=self.model,
                 messages=messages,
-                temperature=self.default_temp if not json_mode else 0.1, # json模式通常需要低温
+                temperature=self.default_temp if not json_mode else 0.1,  # json模式通常需要低温
                 response_format={"type": "json_object"} if json_mode else None
             )
             return response.choices[0].message.content
@@ -56,7 +57,7 @@ class ZhipuBackend(LLMBackend):
 class GeminiBackend(LLMBackend):
     """使用 Google Gemini SDK 的聊天实现。"""
 
-    def __init__(self, config:dict):
+    def __init__(self, config: dict):
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("❌ 未找到 GEMINI_API_KEY，请检查 .env 文件")
@@ -72,7 +73,8 @@ class GeminiBackend(LLMBackend):
             temperature=0.1 if json_mode else 0.7
         )
         try:
-            response = self.model.generate_content(full_prompt, generation_config=config)
+            response = self.model.generate_content(
+                full_prompt, generation_config=config)
             return response.text
         except Exception as e:
             print(f"⚠️ Gemini API Error: {e}")
@@ -90,8 +92,8 @@ class LLMFactory:
         根据配置字典创建 LLM 实例
         :param llm_config: 包含 provider, model_name, temperature 的字典
         """
-        provider = llm_config.get("provider","zhipu")
-        
+        provider = llm_config.get("provider", "zhipu")
+
         if provider == "zhipu":
             return ZhipuBackend(llm_config)
         elif provider == "gemini":
@@ -100,6 +102,8 @@ class LLMFactory:
             raise ValueError(f"Unknown provider: {provider}")
 
 # 5. 辅助函数：用于 GraphRAG 生成答案
+
+
 def draft_answer_with_graph(question: str, evidence: list, llm_config: dict) -> str:
     """
     基于图谱三元组生成答案 (接收 llm_config)

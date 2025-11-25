@@ -1,16 +1,16 @@
 """基于句向量的语义检索器。"""
+from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
+from typing import List, Tuple, Dict
+from pathlib import Path
+import numpy as np
+import torch
+import json
 import os
 # 镜像加速
 
 # 核心组件：向量检索（语义匹配）
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-import json
-import torch
-import numpy as np
-from pathlib import Path
-from typing import List, Tuple, Dict
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 
 
 class VectorRetriever:
@@ -22,7 +22,8 @@ class VectorRetriever:
         self.model = SentenceTransformer(model_name, device=device)
 
         # 加载数据
-        self.rows = [json.loads(l) for l in Path(data_path).read_text(encoding="utf-8-sig").splitlines() if l.strip()]
+        self.rows = [json.loads(l) for l in Path(data_path).read_text(
+            encoding="utf-8-sig").splitlines() if l.strip()]
         # 构建文档库：将实体的各个属性拼成一段文本用于嵌入
         self.corpus = [self._concat(r) for r in self.rows]
 

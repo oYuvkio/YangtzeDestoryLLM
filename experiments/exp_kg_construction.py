@@ -1,8 +1,9 @@
+from kg.extractor import KnowledgeExtractor
 import sys
 import os
 import json
 import time
-from tqdm import tqdm # 进度条库，pip install tqdm
+from tqdm import tqdm  # 进度条库，pip install tqdm
 # 实验一：知识抽取流程
 # ----------------------------------------------------------------------
 # 🔧 路径黑魔法：将项目根目录加入 sys.path，防止 import 报错
@@ -10,8 +11,6 @@ from tqdm import tqdm # 进度条库，pip install tqdm
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
-
-from kg.extractor import KnowledgeExtractor
 
 
 def run_extraction_experiment():
@@ -69,7 +68,8 @@ def run_extraction_experiment():
         })
 
     # 4. 保存实验结果
-    output_path = os.path.join(project_root, "experiments", "results_extraction.json")
+    output_path = os.path.join(
+        project_root, "experiments", "results_extraction.json")
     with open(output_path, "w", encoding="utf-8-sig") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 

@@ -1,7 +1,11 @@
+from kg.llm_core import LLMFactory
+from kg.build_from_json import build_graph
+from retrievers.graph_retriever import hop_subgraph, format_subgraph
+from retrievers.vector_retriever import VectorRetriever
 import sys
 import os
 import json
-import pandas as pd # pip install pandas
+import pandas as pd  # pip install pandas
 
 # 🔧 添加项目根目录到路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -9,11 +13,6 @@ project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
 
 # 导入我们的模块
-from retrievers.vector_retriever import VectorRetriever
-from retrievers.graph_retriever import hop_subgraph, format_subgraph
-from kg.build_from_json import build_graph
-from kg.llm_core import LLMFactory
-
 
 
 def get_baseline_answer(question, retriever):
@@ -26,13 +25,14 @@ def get_baseline_answer(question, retriever):
         return "未找到相关信息", []
 
     # 2. 拼接上下文
-    context_text = "\n".join([f"[{i+1}] {content}" for i, (content, score) in enumerate(hits)])
+    context_text = "\n".join(
+        [f"[{i+1}] {content}" for i, (content, score) in enumerate(hits)])
 
     # 3. LLM 生成
     prompt = f"基于以下背景信息回答问题：\n{context_text}\n\n问题：{question}"
     llm = LLMFactory.create(cfg.llm.provider)
     answer = chat_with_llm(prompt, system_prompt="你是一个助手。")
-    return answer, [h[0] for h in hits] # 返回答案和检索到的原始数据
+    return answer, [h[0] for h in hits]  # 返回答案和检索到的原始数据
 
 
 def get_graphrag_answer(question, vector_retriever, graph):
@@ -44,17 +44,18 @@ def get_graphrag_answer(question, vector_retriever, graph):
     if not hits:
         return "未找到相关实体", []
 
-    center_id = hits[0][0].get("id") # 假设数据中有 id 字段
+    center_id = hits[0][0].get("id")  # 假设数据中有 id 字段
     if not center_id:
-         # 如果是纯文本块没有ID，这里需要逻辑适配，为了演示假设有ID
-         return "检索到的内容无法定位图节点", []
+        # 如果是纯文本块没有ID，这里需要逻辑适配，为了演示假设有ID
+        return "检索到的内容无法定位图节点", []
 
     # 2. 获取 2-hop 子图
     sub_graph = hop_subgraph(graph, [center_id], hops=2)
     evidence_triples = format_subgraph(sub_graph)
 
     # 3. 格式化三元组证据
-    context_text = "\n".join([f"- {s} {r} {o}" for s, r, o in evidence_triples])
+    context_text = "\n".join(
+        [f"- {s} {r} {o}" for s, r, o in evidence_triples])
 
     # 4. LLM 生成
     prompt = f"基于以下知识图谱结构化数据回答问题：\n{context_text}\n\n问题：{question}"
@@ -68,11 +69,12 @@ def run_qa_experiment():
     print(">>> 开始运行：QA 方法对比实验 (Innovation 2) <<<")
 
     # 1. 准备路径
-    data_path = os.path.join(project_root, "data", "processed", "sample_events.jsonl")
+    data_path = os.path.join(project_root, "data",
+                             "processed", "sample_events.jsonl")
 
     # 2. 初始化模块
     print("正在初始化检索器和图谱...")
-    vector_retriever = VectorRetriever(data_path) # 你的向量检索器
+    vector_retriever = VectorRetriever(data_path)  # 你的向量检索器
     kg_graph = build_graph(data_path)             # 你的 NetworkX 图
 
     # 3. 准备评测问题 (Questons)
@@ -91,7 +93,8 @@ def run_qa_experiment():
         base_ans, base_ctx = get_baseline_answer(q, vector_retriever)
 
         # --- 跑 Ours (GraphRAG) ---
-        graph_ans, graph_ctx = get_graphrag_answer(q, vector_retriever, kg_graph)
+        graph_ans, graph_ctx = get_graphrag_answer(
+            q, vector_retriever, kg_graph)
 
         comparison_results.append({
             "question": q,
@@ -103,7 +106,8 @@ def run_qa_experiment():
 
     # 5. 保存并展示结果
     df = pd.DataFrame(comparison_results)
-    output_file = os.path.join(project_root, "experiments", "qa_comparison_report.csv")
+    output_file = os.path.join(
+        project_root, "experiments", "qa_comparison_report.csv")
     df.to_csv(output_file, index=False, encoding="utf-8-sig")
 
     print(f"\n✅ 对比完成！报表已生成: {output_file}")

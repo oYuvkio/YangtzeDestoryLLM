@@ -1,4 +1,7 @@
-import argparse, yaml,sys,os
+import argparse
+import yaml
+import sys
+import os
 from retrievers.text_retriever import BM25Retriever
 from kg.query import GraphRAG
 
@@ -6,6 +9,8 @@ from kg.query import GraphRAG
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # GraphRAG vs 纯文本检索对比
+
+
 def run_text_only(cfg):
     """仅使用 BM25 文本检索评估问答效果。"""
     ret = BM25Retriever(cfg["data_path"])
@@ -13,14 +18,15 @@ def run_text_only(cfg):
     #  适配新的检索器配置结构
     top_k = cfg["retriever"]["top_k"]
     hits = ret.retrieve(q, k=top_k)
-    print("[Text BM25] Top-1 impact:", hits[0][0]["impact"] if hits else "None")
+    print("[Text BM25] Top-1 impact:", hits[0]
+          [0]["impact"] if hits else "None")
 
 
 def run_graph_rag(cfg):
     """运行 GraphRAG 流程并输出草稿答案与证据。"""
     rag = GraphRAG(
-        data_path=cfg["data_path"], 
-        hops=cfg["graph_hops"], 
+        data_path=cfg["data_path"],
+        hops=cfg["graph_hops"],
         top_k=cfg["retriever"]["top_k"],
         llm_config=cfg["llm"]
     )

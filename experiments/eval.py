@@ -1,12 +1,14 @@
 import json
-import argparse, yaml
+import argparse
+import yaml
 from retrievers.text_retriever import BM25Retriever
 
 
 def eval_text(cfg):
     """计算基于 BM25 的问答命中率。"""
     ret = BM25Retriever(cfg["data_path"])
-    golds = [json.loads(l) for l in open(cfg["qa_path"], "r", encoding="utf-8-sig").read().splitlines() if l.strip()]
+    golds = [json.loads(l) for l in open(
+        cfg["qa_path"], "r", encoding="utf-8-sig").read().splitlines() if l.strip()]
     correct = 0
     for item in golds:
         q = item["question"]
@@ -20,7 +22,8 @@ def eval_text(cfg):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/cfg.yaml", type=str, help="配置文件路径")
+    parser.add_argument(
+        "--config", default="configs/cfg.yaml", type=str, help="配置文件路径")
     args = parser.parse_args()
     cfg = yaml.safe_load(open(args.config, "r", encoding="utf-8-sig"))
     eval_text(cfg)

@@ -9,11 +9,11 @@ class GraphRAG:
     """结合文本检索与图谱扩展的问答工作流。"""
 
     def __init__(self, data_path: str, hops: int, top_k: int, llm_config: dict):
-        self.ret = BM25Retriever(data_path) # 注意：这里可以进一步优化为根据配置选择检索器
+        self.ret = BM25Retriever(data_path)  # 注意：这里可以进一步优化为根据配置选择检索器
         self.g = build_graph(data_path)
         self.hops = hops
         self.top_k = top_k
-        self.llm_config = llm_config #  保存 LLM 配置字典
+        self.llm_config = llm_config  # 保存 LLM 配置字典
 
     def answer(self, question: str):
         """返回 GraphRAG 的检索证据和草稿答案。"""
@@ -30,6 +30,7 @@ class GraphRAG:
         triples = format_subgraph(sub)
 
         # 3. 调用 LLM 生成答案 (使用策略模式)  需传入配置
-        reply = draft_answer_with_graph(question, triples, llm_config=self.llm_config)
+        reply = draft_answer_with_graph(
+            question, triples, llm_config=self.llm_config)
 
         return {"evidence": triples, "draft_answer": reply}
