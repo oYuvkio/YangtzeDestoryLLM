@@ -1,6 +1,9 @@
-# kg/prompts.py
+"""
+    Prompt仓库（管理所有给大模型的提示词）模板）
+    集中存放与知识抽取相关的提示模板。
+    
+"""
 
-# Prompt仓库（管理所有给大模型的提示词）
 
 EXTRACT_PROMPT_TEMPLATE = """
         你是一个长江流域灾害领域的知识图谱构建专家。
@@ -19,3 +22,7 @@ EXTRACT_PROMPT_TEMPLATE = """
             ]
         }}
 """
+
+# 示例用法
+# from .prompts import EXTRACT_PROMPT_TEMPLATE
+# prompt = EXTRACT_PROMPT_TEMPLATE.format(text=text)

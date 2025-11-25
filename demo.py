@@ -42,6 +42,7 @@ RAW_TEXT = """
 # 模块一：基于LLM的知识抽取
 # ==========================================
 def extract_knowledge(text):
+    """调用 LLM 将原始文本转换为实体与关系的 JSON 结构。"""
     prompt = f"""
     你是一个长江流域灾害领域的知识图谱构建专家。
     请从以下文本中抽取实体和关系，构建知识三元组。
@@ -80,6 +81,7 @@ def extract_knowledge(text):
 # 模块二：构建图谱
 # ==========================================
 def build_graph(kg_data):
+    """基于抽取结果构建简易的有向图结构。"""
     G = nx.DiGraph()
     for entity in kg_data['entities']:
         G.add_node(entity['name'], type=entity['type'])
@@ -143,6 +145,7 @@ def graph_retrieval_semantic(G, query, threshold=0.4): # 稍微调低阈值，�
     return "\n".join(list(set(context_triples)))
 
 def generate_answer(query, graph_context):
+    """把检索到的三元组上下文交给 LLM 生成答案。"""
     prompt = f"""
     你是一个基于知识图谱的问答助手。
     请根据以下检索到的结构化知识（三元组）回答用户问题。

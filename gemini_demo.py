@@ -46,6 +46,7 @@ RAW_TEXT = """
 # 模块一：基于LLM的知识抽取
 # ==========================================
 def extract_knowledge(text):
+    """使用 Gemini 模型从原文抽取实体关系信息。"""
     prompt = f"""
     你是一个长江流域灾害领域的知识图谱构建专家。
     请从以下文本中抽取实体和关系，构建知识三元组。
@@ -88,6 +89,7 @@ def extract_knowledge(text):
 # 模块二：构建图谱
 # ==========================================
 def build_graph(kg_data):
+    """根据抽取结果构建网络图，空结果时返回空图。"""
     G = nx.DiGraph()
     if not kg_data or not kg_data.get('entities'):
         return G
@@ -158,6 +160,7 @@ def graph_retrieval_semantic(G, query, threshold=0.4): # 稍微调低阈值，�
     return "\n".join(list(set(context_triples)))
 
 def generate_answer(query, graph_context):
+    """将结构化证据发送给 Gemini 生成自然语言回答。"""
     prompt = f"""
     你是一个基于知识图谱的问答助手。
     请根据以下检索到的结构化知识（三元组）回答用户问题。

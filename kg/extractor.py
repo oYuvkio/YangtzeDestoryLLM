@@ -1,7 +1,7 @@
-# 文件路径: kg/extractor.py 
-# 知识抽取器 - 创新点一 
-# 作用：负责将非结构化文本转化为结构化图谱数据 
-
+""" 知识抽取模块，负责将原始文本转为结构化三元组。
+    知识抽取器 - 创新点一 
+    作用：负责将非结构化文本转化为结构化图谱数据 
+""" 
 import json
 from .llm_core import chat_with_llm
 
@@ -9,7 +9,10 @@ from .prompts import EXTRACT_PROMPT_TEMPLATE # 导入提示词模板
 
 # 知识抽取器（非结构化 -> 结构化）
 class KnowledgeExtractor:
+    """利用 LLM 对输入文本执行命名实体和关系抽取。"""
+
     def __init__(self):
+        # 目前无额外初始化逻辑，预留扩展空间（如模型缓存、配置加载等）
         pass
 
     def extract(self, text: str) -> dict:
