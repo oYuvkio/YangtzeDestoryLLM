@@ -1,7 +1,6 @@
 from retrievers.text_retriever import BM25Retriever
 from retrievers.graph_retriever import hop_subgraph, format_subgraph
 from kg.build_from_json import build_graph
-# 🔥 修改这里：导入新的核心模块，不再用 stub
 from kg.llm_core import draft_answer_with_graph
 
 
@@ -9,12 +8,12 @@ from kg.llm_core import draft_answer_with_graph
 class GraphRAG:
     """结合文本检索与图谱扩展的问答工作流。"""
 
-    def __init__(self, data_path: str, hops: int = 2, top_k: int = 3, llm_provider: str = "zhipu"):
-        self.ret = BM25Retriever(data_path)
+    def __init__(self, data_path: str, hops: int, top_k: int, llm_config: dict):
+        self.ret = BM25Retriever(data_path) # 注意：这里可以进一步优化为根据配置选择检索器
         self.g = build_graph(data_path)
         self.hops = hops
         self.top_k = top_k
-        self.llm_provider = llm_provider # 支持切换模型
+        self.llm_config = llm_config #  保存 LLM 配置字典
 
     def answer(self, question: str):
         """返回 GraphRAG 的检索证据和草稿答案。"""
@@ -30,7 +29,7 @@ class GraphRAG:
         sub = hop_subgraph(self.g, center_ids, hops=self.hops)
         triples = format_subgraph(sub)
 
-        # 3. 调用 LLM 生成答案 (使用策略模式)
-        reply = draft_answer_with_graph(question, triples, provider=self.llm_provider)
+        # 3. 调用 LLM 生成答案 (使用策略模式)  需传入配置
+        reply = draft_answer_with_graph(question, triples, llm_config=self.llm_config)
 
         return {"evidence": triples, "draft_answer": reply}

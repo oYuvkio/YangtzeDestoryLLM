@@ -25,12 +25,14 @@ class LLMBackend(ABC):
 class ZhipuBackend(LLMBackend):
     """调用智谱 ChatCompletions 接口的实现。"""
 
-    def __init__(self):
+    def __init__(self,config:dict):
         api_key = os.getenv("ZHIPU_API_KEY")
         if not api_key:
             raise ValueError("❌ 未找到 ZHIPU_API_KEY，请检查 .env 文件")
         self.client = ZhipuAI(api_key=api_key)
-
+        # 🔥 从配置中读取模型参数
+        self.model = config.get("model_name", "glm-4.5-flash")
+        self.default_temp = config.get("temperature", 0.1)
     # 实现智谱的调用逻辑
     def chat(self, prompt: str, system_prompt: str = None, json_mode: bool = False) -> str:
         messages = [{"role": "user", "content": prompt}]
@@ -39,9 +41,9 @@ class ZhipuBackend(LLMBackend):
 
         try:
             response = self.client.chat.completions.create(
-                model="glm-4.5-flash", # 或 glm-4
+                model=self.model, 
                 messages=messages,
-                temperature=0.1 if json_mode else 0.7,
+                temperature=self.default_temp if not json_mode else 0.1, # json模式通常需要低温
                 response_format={"type": "json_object"} if json_mode else None
             )
             return response.choices[0].message.content
@@ -54,12 +56,14 @@ class ZhipuBackend(LLMBackend):
 class GeminiBackend(LLMBackend):
     """使用 Google Gemini SDK 的聊天实现。"""
 
-    def __init__(self):
+    def __init__(self, config:dict):
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("❌ 未找到 GEMINI_API_KEY，请检查 .env 文件")
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')
+        model_name = config.get("model_name", "gemini-2.5-flash")
+        self.model = genai.GenerativeModel(model_name)
+        self.default_temp = config.get("temperature", 0.1)
 
     def chat(self, prompt: str, system_prompt: str = None, json_mode: bool = False) -> str:
         full_prompt = f"System: {system_prompt}\nUser: {prompt}" if system_prompt else prompt
@@ -78,23 +82,27 @@ class GeminiBackend(LLMBackend):
 # 4. 工厂模式：统一入口
 class LLMFactory:
     """
-    根据 provider 字符串创建对应的后端实例。工厂模式：根据配置字符串 ("zhipu" 或 "gemini") 自动返回对应的模型实例
+    根据 provider 字符串创建对应的后端实例。工厂模式：根据配置字符串 ("zhipu" 、 "gemini") 自动返回对应的模型实例
     """
     @staticmethod
-    def create(provider: str = "zhipu") -> LLMBackend:
+    def create(llm_config: dict) -> LLMBackend:
+        """
+        根据配置字典创建 LLM 实例
+        :param llm_config: 包含 provider, model_name, temperature 的字典
+        """
+        provider = llm_config.get("provider","zhipu")
+        
         if provider == "zhipu":
-            return ZhipuBackend()
+            return ZhipuBackend(llm_config)
         elif provider == "gemini":
-            return GeminiBackend()
+            return GeminiBackend(llm_config)
         else:
             raise ValueError(f"Unknown provider: {provider}")
 
-
 # 5. 辅助函数：用于 GraphRAG 生成答案
-
-def draft_answer_with_graph(question: str, evidence: list, provider: str = "zhipu") -> str:
+def draft_answer_with_graph(question: str, evidence: list, llm_config: dict) -> str:
     """
-    基于图谱三元组生成答案
+    基于图谱三元组生成答案 (接收 llm_config)
     :param evidence: 三元组列表 [(s, r, o), ...]
     """
     # 格式化证据
@@ -115,5 +123,5 @@ def draft_answer_with_graph(question: str, evidence: list, provider: str = "zhip
     """
 
     # 使用工厂创建 LLM 并调用
-    llm = LLMFactory.create(provider)
+    llm = LLMFactory.create(llm_config)
     return llm.chat(prompt, system_prompt="你是一个基于知识图谱的灾害问答专家。")

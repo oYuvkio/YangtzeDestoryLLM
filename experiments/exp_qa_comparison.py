@@ -12,7 +12,8 @@ sys.path.append(project_root)
 from retrievers.vector_retriever import VectorRetriever
 from retrievers.graph_retriever import hop_subgraph, format_subgraph
 from kg.build_from_json import build_graph
-from kg.llm import chat_with_llm
+from kg.llm_core import LLMFactory
+
 
 
 def get_baseline_answer(question, retriever):
@@ -29,6 +30,7 @@ def get_baseline_answer(question, retriever):
 
     # 3. LLM 生成
     prompt = f"基于以下背景信息回答问题：\n{context_text}\n\n问题：{question}"
+    llm = LLMFactory.create(cfg.llm.provider)
     answer = chat_with_llm(prompt, system_prompt="你是一个助手。")
     return answer, [h[0] for h in hits] # 返回答案和检索到的原始数据
 

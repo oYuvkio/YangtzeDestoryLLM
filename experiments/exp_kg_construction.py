@@ -39,7 +39,7 @@ def run_extraction_experiment():
     for filename in os.listdir(raw_data_dir):
         if filename.endswith(".txt"):
             filepath = os.path.join(raw_data_dir, filename)
-            with open(filepath, "r", encoding="utf-8") as f:
+            with open(filepath, "r", encoding="utf-8-sig") as f:
                 text = f.read()
                 test_docs.append({
                     "doc_id": filename[:-4],  # 去掉 .txt 后缀
@@ -70,7 +70,7 @@ def run_extraction_experiment():
 
     # 4. 保存实验结果
     output_path = os.path.join(project_root, "experiments", "results_extraction.json")
-    with open(output_path, "w", encoding="utf-8") as f:
+    with open(output_path, "w", encoding="utf-8-sig") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
     print(f"\n✅ 实验完成！结果已保存至: {output_path}")
