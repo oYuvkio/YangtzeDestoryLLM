@@ -2,6 +2,8 @@
 from pathlib import Path
 from rank_bm25 import BM25Okapi
 import jieba
+
+# 基线算法：BM25（关键词匹配）
 class BM25Retriever:
     def __init__(self, path: str):
         rows = [json.loads(l) for l in Path(path).read_text(encoding="utf-8-sig").splitlines() if l.strip()]

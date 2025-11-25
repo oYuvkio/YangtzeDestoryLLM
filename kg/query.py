@@ -4,6 +4,7 @@ from kg.build_from_json import build_graph
 # 🔥 修改这里：导入新的核心模块，不再用 stub
 from kg.llm_core import draft_answer_with_graph 
 
+# GraphRAG引擎（负责问答推理）
 class GraphRAG:
     def __init__(self, data_path: str, hops: int = 2, top_k: int = 3, llm_provider: str = "zhipu"):
         self.ret = BM25Retriever(data_path)

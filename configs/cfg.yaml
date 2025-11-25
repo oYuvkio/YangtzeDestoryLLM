@@ -1,4 +1,5 @@
-﻿data_path: "data/processed/sample_events.jsonl"
+﻿# 定义所有超参数（路径、模型、检索K值、图跳数）
+data_path: "data/processed/sample_events.jsonl"
 qa_path: "data/processed/qa_eval.jsonl"
 top_k: 3
 retriever: "bm25"

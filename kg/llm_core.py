@@ -1,4 +1,5 @@
 # 文件路径: kg/llm_core.py
+# LLM基座（策略模式，统一封装智谱/Gemini/OpenAI）
 import os
 from abc import ABC, abstractmethod
 from zhipuai import ZhipuAI
@@ -9,6 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 1. 定义抽象策略接口
+# 作用：屏蔽底层模型差异，想换 GPT-4 只需要加一个类，不用改业务代码。
 class LLMBackend(ABC):
     @abstractmethod
     def chat(self, prompt: str, system_prompt: str = None, json_mode: bool = False) -> str:
@@ -22,6 +24,7 @@ class ZhipuBackend(LLMBackend):
             raise ValueError("❌ 未找到 ZHIPU_API_KEY，请检查 .env 文件")
         self.client = ZhipuAI(api_key=api_key)
 
+    # 实现智谱的调用逻辑
     def chat(self, prompt: str, system_prompt: str = None, json_mode: bool = False) -> str:
         messages = [{"role": "user", "content": prompt}]
         if system_prompt:
@@ -63,6 +66,7 @@ class GeminiBackend(LLMBackend):
 
 # 4. 工厂模式：统一入口
 class LLMFactory:
+    # 工厂模式：根据配置字符串 ("zhipu" 或 "gemini") 自动返回对应的模型实例
     @staticmethod
     def create(provider: str = "zhipu") -> LLMBackend:
         if provider == "zhipu":

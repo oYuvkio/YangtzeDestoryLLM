@@ -1,4 +1,5 @@
 # 文件路径: kg/neo4j_adapter.py
+# Neo4j 适配器 - 将结构化数据写入图数据库
 import os
 import json
 from dotenv import load_dotenv

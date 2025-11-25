@@ -1,6 +1,6 @@
 ﻿import networkx as nx
 from typing import List, Tuple
-
+# 核心组件：图遍历工具（子图提取）
 def hop_subgraph(g: nx.DiGraph, center_ids: List[str], hops: int = 2) -> nx.DiGraph:
     nodes = set(center_ids)
     frontier = set(center_ids)
