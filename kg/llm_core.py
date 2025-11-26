@@ -1,5 +1,11 @@
 # 文件路径: kg/llm_core.py
-"""封装多种 LLM 提供商的调用策略，并提供统一接口。（策略模式，统一封装智谱/Gemini/OpenAI）"""
+"""
+封装多种 LLM 提供商的调用策略，并提供统一接口。（策略模式，统一封装智谱/Gemini/OpenAI）
+
+定义抽象接口 LLMBackend 以及智谱和 Gemini 的具体实现。
+一个简单的工厂函数根据配置字典返回相应的实现。
+
+"""
 import os
 from abc import ABC, abstractmethod
 from zhipuai import ZhipuAI
@@ -129,3 +135,7 @@ def draft_answer_with_graph(question: str, evidence: list, llm_config: dict) -> 
     # 使用工厂创建 LLM 并调用
     llm = LLMFactory.create(llm_config)
     return llm.chat(prompt, system_prompt="你是一个基于知识图谱的灾害问答专家。")
+
+
+__all__ = ["LLMBackend", "ZhipuBackend", "GeminiBackend",
+           "LLMFactory", "draft_answer_with_graph"]

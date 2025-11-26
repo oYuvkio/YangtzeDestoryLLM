@@ -19,32 +19,40 @@ class Neo4jAdapter:
     """封装 Neo4j 连接、清理与导入的常用操作。"""
 
     def __init__(self, uri, user, password):
+        if GraphDatabase is None:
+            raise ImportError("未安装 neo4j 包，无法连接数据库。请运行 pip install neo4j")
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
 
-    def close(self):
+    def close(self) -> None:
         """关闭底层的数据库连接。"""
         self.driver.close()
 
-    def clear_database(self):
-        """清空数据库（慎用，仅测试用）。"""
+    def clear_database(self) -> None:
+        """
+        清空数据库中所有的节点和关系。
+        ⚠️ 警告：此操作不可逆，请仅在测试环境中使用！
+        """
         with self.driver.session() as session:
             session.run("MATCH (n) DETACH DELETE n")
             print("⚠️ 数据库已清空！")
 
-    def import_events(self, jsonl_path):
-        """读取 JSONL 并写入 Neo4j。"""
-        print(f"正在将 {jsonl_path} 导入 Neo4j...")
+    def import_events(self, jsonl_path: str) -> None:
+        """
+        读取 JSONL 文件并将事件数据导入 Neo4j。
 
+        :param jsonl_path: 包含结构化事件数据的 JSONL 文件路径
+        """
+        print(f"正在将 {jsonl_path} 导入 Neo4j...")
         with self.driver.session() as session:
             with open(jsonl_path, "r", encoding="utf-8-sig") as f:
                 lines = f.readlines()
 
-            for line in tqdm(lines, desc="Importing"):
+            # 使用 tqdm 显示导入进度
+            for line in tqdm(lines, desc="正在导入"):
                 if not line.strip():
                     continue
                 event_data = json.loads(line)
-
-                # 使用写事务写入单条数据
+                # 使用写事务模式写入单条数据
                 session.execute_write(self._create_event_subgraph, event_data)
 
     @staticmethod
@@ -101,7 +109,8 @@ if __name__ == "__main__":
 
         # 2. 导入数据
         # 注意：这里用相对路径，确保你在项目根目录运行
-        data_path = "data/processed/sample_events.jsonl"
+        # data_path = "data/processed/sample_events.jsonl"
+        data_path = "data/processed/real_events.jsonl"
         if os.path.exists(data_path):
             adapter.import_events(data_path)
             print("✅ 导入成功！")

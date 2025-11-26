@@ -1,19 +1,35 @@
-from kg.extractor import KnowledgeExtractor
+from kg.extractor import LLMExtractor
 import sys
 import os
 import json
 import time
-from tqdm import tqdm  # 进度条库，pip install tqdm
-# 实验一：知识抽取流程
-# ----------------------------------------------------------------------
-# 🔧 路径黑魔法：将项目根目录加入 sys.path，防止 import 报错
-# ----------------------------------------------------------------------
+import argparse  # 1. 新增参数解析
+import yaml      # 2. 新增 yaml 读取
+from dataclasses import asdict  # 3. 新增 dataclass 转字典工具
+from tqdm import tqdm
+
+# 🔧 路径黑魔法：将项目根目录加入 sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.append(project_root)
 
+# 导入抽取器
 
-def run_extraction_experiment():
+
+def load_config(config_path):
+    """加载 YAML 配置文件"""
+    if not os.path.isabs(config_path):
+        config_path = os.path.join(project_root, config_path)
+
+    try:
+        with open(config_path, "r", encoding="utf-8-sig") as f:
+            return yaml.safe_load(f)
+    except FileNotFoundError:
+        print(f"❌ 配置文件未找到: {config_path}")
+        sys.exit(1)
+
+
+def run_extraction_experiment(args):
     """
     运行知识抽取实验：
     模拟从非结构化文本中抽取知识，并保存结果用于后续计算 F1 值。
@@ -32,9 +48,14 @@ def run_extraction_experiment():
     #     }
     # ]
 
-    test_docs = []
+    # 1. 加载配置
+    cfg = load_config(args.config)
+    print(f"已加载配置，使用模型: {cfg['llm'].get('model_name', 'default')}")
 
+    # 2. 准备数据
+    test_docs = []
     raw_data_dir = os.path.join(project_root, "data", "raw")
+
     for filename in os.listdir(raw_data_dir):
         if filename.endswith(".txt"):
             filepath = os.path.join(raw_data_dir, filename)
@@ -44,18 +65,26 @@ def run_extraction_experiment():
                     "doc_id": filename[:-4],  # 去掉 .txt 后缀
                     "text": text
                 })
+    print(f"找到 {len(test_docs)} 个文档待处理。")
 
-    # 2. 初始化抽取器
-    extractor = KnowledgeExtractor()
+    # 3. 初始化抽取器 (传入 llm 配置)
+    # 这里的 cfg['llm'] 包含了 provider, model_name, temperature 等
+    extractor = LLMExtractor(cfg['llm'])
 
     results = []
 
-    # 3. 批量处理
+    # 4. 批量处理
     for doc in tqdm(test_docs, desc="正在抽取"):
         start_time = time.time()
 
         # 调用核心抽取功能
-        kg_data = extractor.extract(doc["text"])
+        try:
+            kg_result_obj = extractor.extract(doc["text"])
+            # 🔥 修复点：将 ExtractionResult 对象转换为字典
+            kg_data = asdict(kg_result_obj)
+        except Exception as e:
+            print(f"\n⚠️ 文档 {doc['doc_id']} 抽取失败: {e}")
+            kg_data = {"entities": [], "relations": [], "error": str(e)}
 
         end_time = time.time()
 
@@ -67,7 +96,7 @@ def run_extraction_experiment():
             "latency": end_time - start_time
         })
 
-    # 4. 保存实验结果
+    # 5. 保存实验结果
     output_path = os.path.join(
         project_root, "experiments", "results_extraction.json")
     with open(output_path, "w", encoding="utf-8-sig") as f:
@@ -78,4 +107,10 @@ def run_extraction_experiment():
 
 
 if __name__ == "__main__":
-    run_extraction_experiment()
+    # 解析命令行参数
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/cfg.yaml",
+                        help="Path to configuration file")
+    args = parser.parse_args()
+
+    run_extraction_experiment(args)
