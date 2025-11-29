@@ -1,3 +1,10 @@
+from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
+import numpy as np
+import google.generativeai as genai  # 导入Gemini库
+import matplotlib.pyplot as plt
+import networkx as nx
+import json
 import os
 from dotenv import load_dotenv
 load_dotenv()
@@ -5,17 +12,10 @@ load_dotenv()
 # 🔥 核心修复：使用国内镜像加速下载 HuggingFace 模型
 # -------------------------------------------------------
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-import json
-import networkx as nx
-import matplotlib.pyplot as plt
-import google.generativeai as genai # 导入Gemini库
 
 # -------------------------------------------------------
 # 修复 ImportError: 必须在导入 sentence_transformers 之前导入 numpy
 # -------------------------------------------------------
-import numpy as np
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 
 # ==========================================
 # 配置区域
@@ -45,6 +45,8 @@ RAW_TEXT = """
 # ==========================================
 # 模块一：基于LLM的知识抽取
 # ==========================================
+
+
 def extract_knowledge(text):
     """使用 Gemini 模型从原文抽取实体关系信息。"""
     prompt = f"""
@@ -82,12 +84,14 @@ def extract_knowledge(text):
         print(f"使用 Gemini 抽取失败: {e}")
         # 检查是否有关于API Key的错误
         if "API_KEY_INVALID" in str(e) or "permission" in str(e).lower():
-             print("错误提示：您的 Gemini API Key 可能无效或未正确设置。")
+            print("错误提示：您的 Gemini API Key 可能无效或未正确设置。")
         return {"entities": [], "relations": []}
 
 # ==========================================
 # 模块二：构建图谱
 # ==========================================
+
+
 def build_graph(kg_data):
     """根据抽取结果构建网络图，空结果时返回空图。"""
     G = nx.DiGraph()
@@ -102,10 +106,13 @@ def build_graph(kg_data):
 # ==========================================
 # 模块三：GraphRAG (语义检索优化版)
 # ==========================================
+
+
 def get_embedding(text):
     return embedding_model.encode(text)
 
-def graph_retrieval_semantic(G, query, threshold=0.4): # 稍微调低阈值，确保能匹配上
+
+def graph_retrieval_semantic(G, query, threshold=0.4):  # 稍微调低阈值，确保能匹配上
     """
     基于语义向量的检索
     """
@@ -143,21 +150,23 @@ def graph_retrieval_semantic(G, query, threshold=0.4): # 稍微调低阈值，�
             for neighbor in neighbors:
                 edge_data = G.get_edge_data(start_node, neighbor)
                 relation = edge_data.get('relation', '未知关系')
-                context_triples.append(f"{start_node} --[{relation}]--> {neighbor}")
+                context_triples.append(
+                    f"{start_node} --[{relation}]--> {neighbor}")
 
             predecessors = list(G.predecessors(start_node))
             for pred in predecessors:
                 edge_data = G.get_edge_data(pred, start_node)
                 relation = edge_data.get('relation', '未知关系')
-                context_triples.append(f"{pred} --[{relation}]--> {start_node}")
+                context_triples.append(
+                    f"{pred} --[{relation}]--> {start_node}")
         except nx.NetworkXError as e:
             print(f"检索节点 '{start_node}' 的邻居时出错: {e}")
-
 
     if not context_triples:
         return "找到了实体，但该实体没有关联的三元组信息。"
 
     return "\n".join(list(set(context_triples)))
+
 
 def generate_answer(query, graph_context):
     """将结构化证据发送给 Gemini 生成自然语言回答。"""
@@ -186,7 +195,7 @@ def generate_answer(query, graph_context):
     except Exception as e:
         print(f"使用 Gemini 生成答案失败: {e}")
         if "API_KEY_INVALID" in str(e) or "permission" in str(e).lower():
-             print("错误提示：您的 Gemini API Key 可能无效或未正确设置。")
+            print("错误提示：您的 Gemini API Key 可能无效或未正确设置。")
         return "抱歉，生成答案时遇到错误。"
 
 
@@ -224,7 +233,8 @@ if __name__ == "__main__":
                 {"name": "加固堤防", "type": "应对措施"}
             ],
             "relations": [
-                {"head": "1998年长江全流域特大洪水", "relation": "发生时间", "tail": "1998年6月中旬至9月上旬"},
+                {"head": "1998年长江全流域特大洪水", "relation": "发生时间",
+                    "tail": "1998年6月中旬至9月上旬"},
                 {"head": "1998年长江全流域特大洪水", "relation": "严重程度次于", "tail": "1954年大洪水"},
                 {"head": "1998年长江全流域特大洪水", "relation": "主要原因", "tail": "气候异常"},
                 {"head": "1998年长江全流域特大洪水", "relation": "主要原因", "tail": "降雨集中"},
@@ -236,7 +246,6 @@ if __name__ == "__main__":
                 {"head": "1998年长江全流域特大洪水", "relation": "应对措施", "tail": "加固堤防"}
             ]
         }
-
 
     print("\n>>> STEP 2: 构建图谱")
     G = build_graph(kg_data)

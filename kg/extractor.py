@@ -54,6 +54,7 @@ class LLMExtractor:
     ----------
     llm_config: Dict
         直接传递给 :func:`kg.llm_core.LLMFactory.create` 的配置字典。
+        若为空则使用默认的智谱配置。
 
     属性
     ----------
@@ -61,9 +62,14 @@ class LLMExtractor:
         从 :mod:`kg.llm_core` 创建的具体 LLM 后端实例。
     """
 
-    def __init__(self, llm_config: Dict[str, object]):
-        self.llm_config = llm_config
-        self.llm = LLMFactory.create(llm_config)
+    def __init__(self, llm_config: Optional[Dict[str, object]] = None):
+        # 提供默认配置，方便快速运行示例
+        self.llm_config = llm_config or {
+            "provider": "zhipu",
+            "model_name": "glm-4.5-flash",
+            "temperature": 0.1,
+        }
+        self.llm = LLMFactory.create(self.llm_config)
 
     def extract(self, text: str) -> ExtractionResult:
         """
@@ -350,4 +356,23 @@ class DeepLearningExtractor:
         return relations
 
 
-__all__ = ["LLMExtractor", "DeepLearningExtractor", "ExtractionResult"]
+__all__ = ["LLMExtractor", "DeepLearningExtractor",
+           "ExtractionResult", "KnowledgeExtractor"]
+
+
+class KnowledgeExtractor:
+    """
+    对外暴露的简单包装器：复用 LLMExtractor，但返回 dict 便于老代码兼容。
+
+    设计动机：
+    * main_pipeline.py 直接期望 extractor.extract 返回字典，本类做格式适配。
+    * 支持在初始化时透传 llm_config 以便快速切换 provider。
+    """
+
+    def __init__(self, llm_config: Optional[Dict[str, object]] = None):
+        self._extractor = LLMExtractor(llm_config=llm_config)
+
+    def extract(self, text: str) -> Dict[str, List[Dict[str, str]]]:
+        """返回 {"entities": [...], "relations": [...]} 结构。"""
+        result = self._extractor.extract(text)
+        return {"entities": result.entities, "relations": result.relations}

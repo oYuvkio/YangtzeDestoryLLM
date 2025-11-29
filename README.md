@@ -21,3 +21,20 @@ conda activate YangtzeLLM
 
 # 安装依赖
 pip install -r requirements.txt
+
+### 2. CQ 驱动的 KG 构建快速演示
+
+项目内置了与 `summary/CQ_Summary.txt` 对齐的 CQ→TBox→事件抽取流水线，脚本位于 `scripts/run_cq_pipeline.py`：
+
+```bash
+# 以 OpenAI 兼容接口为例，需先导出 OPENAI_API_KEY
+python scripts/run_cq_pipeline.py --provider openai --model gpt-4o-mini --n-cq 10
+
+# 或使用智谱
+python scripts/run_cq_pipeline.py --provider zhipu --model glm-4.5-flash
+```
+
+输出会写入 `outputs/cq_pipeline/`，包含：
+- `p1_cqs.json`：能力问题列表；
+- `p2_tbox_init.json`：初始 TBox；
+- `p5_events.json`：在 TBox 约束下抽取的事件与三元组（默认使用 1998 洪水示例段落）。

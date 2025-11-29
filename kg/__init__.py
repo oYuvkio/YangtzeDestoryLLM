@@ -15,7 +15,10 @@ from .neo4j_adapter import Neo4jAdapter  # noqa: F401
 from .schema import RELATIONS  # noqa: F401
 
 # 导入知识抽取器 (修正了文件名引用，从 .extractor 导入)
-from .extractor import LLMExtractor, DeepLearningExtractor, ExtractionResult
+from .extractor import LLMExtractor, DeepLearningExtractor, ExtractionResult, KnowledgeExtractor
+
+# CQ 驱动 Pipeline
+from .cq_pipeline import CQLLMPipeline  # noqa: F401
 
 # 注意：GraphRetriever 通常位于 retrievers 包中，不建议在这里重新导出，
 # 除非您在 kg 目录下也有同名文件。如果需要，请确保文件路径正确。
@@ -26,7 +29,9 @@ __all__ = [
     "draft_answer_with_graph",
     "Neo4jAdapter",
     "RELATIONS",
-    "LLMExtractor",         # 新增
-    "DeepLearningExtractor",  # 新增
-    "ExtractionResult",     # 新增
+    "LLMExtractor",
+    "DeepLearningExtractor",
+    "ExtractionResult",
+    "KnowledgeExtractor",
+    "CQLLMPipeline",
 ]
