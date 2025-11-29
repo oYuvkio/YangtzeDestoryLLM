@@ -84,8 +84,43 @@ class LLMExtractor:
             包含最终实体和关系列表的数据类。
         """
         # 阶段 1：候选生成
+        # 获取允许的关系列表
+        allowed_relations = list(set(RELATIONS.values()))
+
         generation_prompt = f"""
-你是长江流域灾害领域的知识图谱构建专家。下面是一段原始文本，请你识别文本中的实体及它们之间的关系。
+
+你是一个长江流域灾害领域的知识图谱构建专家。
+你的任务是从给定的文本中，识别出一个**核心灾害事件**，并提取该事件的属性。
+请遵循以下**严格约束**：
+1. **核心事件识别**：首先确定文本描述的主要灾害事件名称（例如"2020年长江洪涝"）。
+2. **星型结构**：所有的关系（relations）必须以这个**核心事件**作为 `head`（头实体）。
+3. **关系约束**：`relation` 只能从以下列表中选择：{allowed_relations}。
+   - occurs_on (发生时间)
+   - occurs_in (发生地点)
+   - has_cause (致灾因子/原因)
+   - has_impact (造成影响/损失)
+   - has_measure (应对措施)
+   - has_type (灾害类型)
+4. **不要**提取与核心事件无关的实体间关系（例如不要提取 "暴雨"->"导致"->"洪水"，而应提取 "洪水"->"has_cause"->"暴雨"）。
+
+【示例】
+输入："受强降雨影响，2020年7月安徽发生严重内涝，政府紧急转移安置群众。"
+输出：
+{{
+  "entities": [
+    {{"name": "2020年安徽内涝", "type": "灾害事件"}},
+    {{"name": "强降雨", "type": "原因"}},
+    {{"name": "2020年7月", "type": "时间"}},
+    {{"name": "转移安置群众", "type": "措施"}}
+  ],
+  "relations": [
+    {{"head": "2020年安徽内涝", "relation": "has_cause", "tail": "强降雨"}},
+    {{"head": "2020年安徽内涝", "relation": "occurs_on", "tail": "2020年7月"}},
+    {{"head": "2020年安徽内涝", "relation": "has_measure", "tail": "转移安置群众"}}
+  ]
+}}
+
+【当前任务】
 
 文本内容：
 "{text.strip()}"
@@ -102,7 +137,7 @@ class LLMExtractor:
 """
         # 使用 json_mode=True 强制模型输出 JSON
         raw_response = self.llm.chat(
-            generation_prompt, system_prompt="你是一个遵循指令的 JSON 信息抽取助手。", json_mode=True)
+            generation_prompt, system_prompt="你是一个遵循指令的、严谨的知识抽取助手，仅输出 JSON。", json_mode=True)
         try:
             # 某些模型可能会用 Markdown 代码块包裹 JSON；如果存在则去除
             parsed = json.loads(self._strip_markdown_code(raw_response))
@@ -110,39 +145,26 @@ class LLMExtractor:
             # 如果解析失败，回退为空结构
             parsed = {"entities": [], "relations": []}
 
-        # 阶段 2：自我批判与过滤
-        # 构建验证提示词
-        candidate_entities = parsed.get("entities", []) or []
-        candidate_relations = parsed.get("relations", []) or []
-        # 获取 schema.py 中定义的所有关系值（如 occurs_in, has_cause 等）
-        allowed_relations = list(set(RELATIONS.values()))
+        # 阶段 2：格式清洗（确保所有 head 都是同一个事件）
+        # 简单的后处理：找到出现次数最多的 head 作为主事件，过滤掉其他的杂音
+        if parsed.get("relations"):
+            from collections import Counter
+            heads = [r["head"] for r in parsed["relations"]]
+            if heads:
+                # 找到主事件名称
+                main_event = Counter(heads).most_common(1)[0][0]
+                # 只保留以主事件为头的关系
+                filtered_rels = [r for r in parsed["relations"]
+                                 if r["head"] == main_event]
+                parsed["relations"] = filtered_rels
 
-        validation_prompt = f"""
-你作为知识图谱专家，需要审校以下候选实体和关系的列表是否准确。
-原始文本："{text.strip()}"
+                # 确保主事件在实体列表中
+                entity_names = {e["name"] for e in parsed["entities"]}
+                if main_event not in entity_names:
+                    parsed["entities"].append(
+                        {"name": main_event, "type": "灾害事件"})
 
-候选实体列表：{json.dumps(candidate_entities, ensure_ascii=False)}
-候选关系列表：{json.dumps(candidate_relations, ensure_ascii=False)}
-
-请对每一条关系进行验证，确保：
-1. 头实体和尾实体都在实体列表中；
-2. 关系名称属于允许的集合 {allowed_relations}；
-3. 关系确实可以从原始文本中推断得到。
-
-如果某条关系不符合条件，请将其从结果中去掉。你不需要解释理由，只需返回一个 JSON，结构与输入保持一致。
-
-JSON 模板：
-{{"entities": [...], "relations": [...]}}
-"""
-        validated_response = self.llm.chat(
-            validation_prompt, system_prompt="你是一个严谨的事实验证助手，仅输出有效 JSON。", json_mode=True)
-        try:
-            validated = json.loads(
-                self._strip_markdown_code(validated_response))
-        except Exception:
-            validated = parsed  # 如果验证解析失败，则回退到原始结果
-
-        return ExtractionResult(entities=validated.get("entities", []), relations=validated.get("relations", []))
+        return ExtractionResult(entities=parsed.get("entities", []), relations=parsed.get("relations", []))
 
     @staticmethod
     def _strip_markdown_code(text: str) -> str:
