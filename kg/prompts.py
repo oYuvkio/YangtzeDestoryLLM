@@ -8,123 +8,498 @@
 
 # ========== P1：能力问题设计 ==========
 P1_CQ_PROMPT = """
-你是一名流域防洪减灾领域专家和本体工程师，负责为“长江流域水旱灾害防治与应急响应知识图谱”设计能力问题（CQ）。
-请按照以下要求输出 JSON：
-1) 设计不少于 {n_cq} 个中文能力问题，覆盖主题：典型事件、空间分布、致灾因子、防治措施、应急响应、工程调度、气候背景；
-2) 每个问题包含唯一 id（如 CQ-001）、主题 theme、问题 question；
-3) 严格输出 JSON，结构：
+角色：你是一名本体工程师专家，正在开发一个针对长江流域防灾减灾与应急响应的专项本体。
+
+
+该本体旨在支持开发一个关于长江流域水旱灾害的LLM增强问答系统，其目标包括：
+1) 支撑关于“长江流域洪水与干旱”的结构化问答与知识检索；
+2) 刻画典型灾害事件、防治与应急措施，以及对重要城市、流域单元和人群的影响；
+3) 为后续的“知识图谱检索增强型大模型（KG-RAG）”提供清晰、可计算的语义约束。
+
+
+领域本体范围
+该本体涵盖长江流域灾害风险管理周期的关键要素，包括但不限于以下方面：
+  {domain_desc}
+
+  
+你的任务：
+在上述目标与范围约束下，生成 {n_cq} 条高层次、核心的能力问题（CQ）。
+
+每个问题必须同时满足以下要求：
+1) 清晰代表与长江流域防灾或应急响应相关的重要用户信息需求或查询场景，而不是泛泛而谈；
+2) 使用简洁、规范的中文书面语表述，语言准确、无歧义；
+   - 不要使用含糊词汇（如“很多”“大量”“最近”“比较多”）；
+   - 不要出现“你/我/我们/系统”等对话式表述；
+3) 问题的答案应当可以通过对知识图谱进行结构化查询获得,便于后续转化为图数据库查询；
+   （例如基于时间、空间、事件、致灾因子、防治措施等维度检索或统计）
+4) 覆盖风险管理周期的不同阶段，避免仅限于一般性灾害管理问题, 避免过于具体的事件细节（如某次具体洪水的精确数据）
+
+类别（category）说明：
+请为每个能力问题指定一个最合适的类别，用简短中文短语表示。
+类别可以从下列候选中选择，也可以在保持风格一致的前提下少量扩展：
+- 灾害事件分析（例如：某次洪水/干旱事件的成因、演变、特征）
+- 致灾因子诊断（例如：降水、水库调度、人类活动对灾害的贡献）
+- 灾害影响评估（例如：人员伤亡、经济损失、农田受灾、基础设施影响）
+- 空间分布与脆弱性（例如：高风险地区、重点城市、脆弱人群）
+- 时序演变与统计（例如：某时段灾害频率、强度变化趋势）
+- 防治与工程措施（例如：堤防、水库群联合调度、分洪蓄滞洪区运用）
+- 应急响应与预案（例如：应急响应级别、启动条件、处置流程）
+- 综合情景与联合调度（例如：干旱与洪水交替、流域上下游联动）
+
+整体分布要求（由你在生成时自动考虑）：
+- 生成的 {n_cq} 条能力问题应尽量覆盖上述不同类别，不要将所有问题都归为同一类别；
+
+参考示例如下（仅为结构示例，内容可自行生成）：
 {{
-  "cqs": [{{"id": "CQ-001", "theme": "主题", "question": "问题"}}]
+  "cqs": [
+    {{
+      "id": 1,
+      "question": "1990年以来长江流域发生过哪些重大洪水事件，其主要受影响省份和经济损失是什么？",
+      "category": "灾害事件分析"
+    }},
+    {{
+      "id": 2,
+      "question": "在什么条件下会启动长江流域防汛IV级应急响应，地方政府需要采取哪些行动？",
+      "category": "应急响应与预案"
+    }}
+  ]
 }}
 
-领域说明：
-{domain_desc}
+输出格式要求：
+1) 仅输出一个 JSON 对象，不要输出任何额外的文字说明、注释或总结；
+2) 顶层必须包含字段 "cqs"，其值是一个长度为 {n_cq} 的数组；
+3) 数组中的每个元素是一个对象，包含以下字段：
+   - "id": 能力问题编号，从 1 开始递增；
+   - "question": 能力问题的中文内容；
+   - "category": 该问题所属的类别（如上所述）。
+4) 严格保证输出是合法的 JSON，最外层只能有一个对象，数组外不要有其他多余字符，也不要使用 Markdown 代码块语法。
 """
+
 
 # ========== P2：CQ -> 初始模式 ==========
-P2_SCHEMA_PROMPT = """
-你是一名知识图谱本体工程师，任务是从能力问题（CQ）中归纳实体类、关系、属性。
-请对下面的 CQ JSON 进行归纳，输出 classes、relations、attributes：
-* class: name (PascalCase)、cn_name、definition、examples
-* relation: name (snake_case)、cn_name、domain、range、definition
-* attribute: owner、name、cn_name、value_type (string|number|datetime)
 
-CQ 列表：
+P2_SCHEMA_PROMPT = """
+
+你是一名知识图谱本体工程师，擅长从能力问题中提炼实体类（classes）、关系（relations）和属性（attributes）。
+你将看到一组关于“长江流域水旱灾害防治与应急响应”的能力问题（CQ）。
+
+输入 CQ 列表示例（结构说明，仅供理解）：
+{{
+  "cqs": [
+    {{
+      "id": 1,
+      "question": "1998 年长江特大洪水主要影响了哪些省市和重要城市？造成了哪些主要经济损失类型？",
+      "category": "灾害事件分析"
+    }},
+    {{
+      "id": 2,
+      "question": "在什么条件下会启动长江流域防汛IV级应急响应，地方政府需要采取哪些行动？",
+      "category": "应急响应与预案"
+    }}
+  ]
+}}
+
+实际输入的 CQ 列表如下（JSON）：
 {cq_json}
 
-请严格输出 JSON：
+
+你的任务是：
+
+1. 根据 CQ 中隐含的语义需求，归纳出候选实体类（classes）：
+   - 每个类用英文 name（如 FloodEvent）、中文名 cn_name（如 洪水事件）和定义 (definition) 描述；
+   - examples 中给出 1~3 个典型实例（中文字符串）。
+
+2. 归纳出候选关系（relations）：
+   - name 为关系英文名（如 has_cause）；
+   - cn_name 为中文名（如 致灾因子）；
+   - domain / range 分别为主语类和宾语类（必须使用 classes 中已有类名）；
+   - definition 用中文简要说明语义；
+   - functional 表示该关系从 domain 到 range 是否「多对一或一对一」：
+     - 若通常一个主体只有一个此类关系对象，则 functional = true，例如：
+       - DisasterEvent -> has_main_cause -> HazardFactor
+     - 若通常是多对多关系，则 functional = false，例如：
+       - DisasterEvent -> affects_region -> AdministrativeRegion
+
+3. 归纳出关键属性（attributes）：
+   - owner：该属性所属的类名（必须是 classes.name 中的一个）；
+   - name：属性英文名（如 start_time, peak_discharge）；
+   - cn_name：中文名（如 开始时间, 洪峰流量）；
+   - value_type：取值类型，限定为以下枚举之一：
+     - "string", "number", "integer", "float", "boolean", "datetime"
+
+4. 命名要求：
+   - 类名和关系名使用驼峰或下划线风格，保持全局一致，例如：
+     - 类名：FloodEvent, DroughtEvent, AdministrativeRegion
+     - 关系名：has_cause, affects_region
+   - 不要生成语义高度重复的类或关系（如 FloodEvent 与 FloodDisaster 含义几乎相同，应合并）。
+
+---
+
+输出格式要求（非常重要）：
+
+1. 仅输出一个 JSON 对象，不要输出任何额外说明或注释。
+2. 顶层对象必须包含以下三个字段，且都为数组（即使为空也必须给出空数组）：
+   - "classes": [...]
+   - "relations": [...]
+   - "attributes": [...]
+3. "classes" 中每个元素必须包含字段：
+   - "name": string
+   - "cn_name": string
+   - "definition": string
+   - "examples": string 数组
+4. "relations" 中每个元素必须包含字段：
+   - "name": string
+   - "cn_name": string
+   - "domain": string
+   - "range": string
+   - "definition": string
+   - "functional": 布尔值 true/false
+5. "attributes" 中每个元素必须包含字段：
+   - "owner": string
+   - "name": string
+   - "cn_name": string
+   - "value_type": 上述枚举之一
+6. 严格保证输出是合法 JSON，最外层只允许出现一个对象，不要使用 Markdown 代码块语法。
+
+参考输出结构示例（内容仅供参考）：
 {{
-  "classes": [{{"name": "...", "cn_name": "...", "definition": "...", "examples": ["..."]}}],
-  "relations": [{{"name": "...", "cn_name": "...", "domain": "...", "range": "...", "definition": "..."}}],
-  "attributes": [{{"owner": "...", "name": "...", "cn_name": "...", "value_type": "string|number|datetime"}}]
+  "classes": [
+    {{
+      "name": "DisasterEvent",
+      "cn_name": "灾害事件",
+      "definition": "在一定时间和空间范围内发生的与长江流域相关的水旱灾害过程",
+      "examples": ["1998年长江特大洪水", "2022年长江流域特大干旱"]
+    }},
+    {{
+      "name": "FloodEvent",
+      "cn_name": "洪水事件",
+      "definition": "特指长江干流或支流发生的明显洪水过程",
+      "examples": ["1998年长江特大洪水"]
+    }}
+  ],
+  "relations": [
+    {{
+      "name": "has_cause",
+      "cn_name": "致灾因子",
+      "domain": "DisasterEvent",
+      "range": "HazardFactor",
+      "definition": "描述导致该灾害发生的主要气象、水文或人为因素",
+      "functional": false
+    }}
+  ],
+  "attributes": [
+    {{
+      "owner": "DisasterEvent",
+      "name": "start_time",
+      "cn_name": "开始时间",
+      "value_type": "datetime"
+    }}
+  ]
 }}
 """
+
 
 # ========== P3：模式重构与层次化 ==========
 P3_REFINEMENT_PROMPT = """
-你是一名本体工程师，请整理下面的模式草案：
+你是一名本体工程师，请对下面的初始模式草案进行整理和规范化处理。
+
+初始模式（JSON）：
 {schema_json}
 
-任务：
-1) 输出 class_hierarchy（parent, children）
-2) 输出 merged_class_aliases（canonical, aliases）
-3) 清洗后的 relations（name, cn_name, domain, range, definition, functional）
+---
 
-返回 JSON：
+任务说明：
+
+1. 构建类层次结构（class_hierarchy）：
+   - 找出明显的父类 / 子类关系，例如：
+     - DisasterEvent 是 FloodEvent 和 DroughtEvent 的父类；
+     - AdministrativeRegion 是 Province、City 的父类。
+   - 每个元素为一个对象，包含：
+     - "parent": 父类英文名（必须出现在原有 classes.name 中）
+     - "children": 子类英文名数组（每个也必须是 classes.name 中的某个值）
+
+2. 归并类的别名（merged_class_aliases）：
+   - 对语义高度相似或明显是同一概念的类进行合并；
+   - 每个元素为一个对象，包含：
+     - "canonical": 选定的规范类名（英文）
+     - "aliases": 需要归并到该规范类名下的其他类名列表（英文）
+   - 若暂时没有明显别名，可以给出空数组。
+
+3. 清洗关系定义（relations）：
+   - 合并重复或语义相同的关系（例如 has_cause / caused_by 等）；
+   - 对每条关系补充或校正以下字段：
+     - "name": 关系英文名
+     - "cn_name": 关系中文名
+     - "domain": 主语类名（使用规范类名）
+     - "range": 宾语类名（使用规范类名）
+     - "definition": 简要中文定义
+     - "functional": 布尔值，表示从 domain 到 range 是否通常为函数式关系
+
+---
+
+输出格式要求：
+
+1. 仅输出一个 JSON 对象，不要输出任何额外文字。
+2. 顶层必须包含以下字段：
+   - "class_hierarchy": 数组
+   - "merged_class_aliases": 数组
+   - "relations": 数组
+3. "class_hierarchy" 中每个元素含字段：
+   - "parent": string
+   - "children": string 数组
+4. "merged_class_aliases" 中每个元素含字段：
+   - "canonical": string
+   - "aliases": string 数组
+5. "relations" 中每个元素含字段：
+   - "name": string
+   - "cn_name": string
+   - "domain": string
+   - "range": string
+   - "definition": string
+   - "functional": boolean
+
+参考输出结构示例（内容仅供参考）：
 {{
-  "class_hierarchy": [...],
-  "merged_class_aliases": [...],
-  "relations": [...]
+  "class_hierarchy": [
+    {{
+      "parent": "DisasterEvent",
+      "children": ["FloodEvent", "DroughtEvent"]
+    }}
+  ],
+  "merged_class_aliases": [
+    {{
+      "canonical": "DisasterEvent",
+      "aliases": ["DisasterProcess"]
+    }}
+  ],
+  "relations": [
+    {{
+      "name": "has_cause",
+      "cn_name": "致灾因子",
+      "domain": "DisasterEvent",
+      "range": "HazardFactor",
+      "definition": "描述导致该灾害发生的主要气象、水文或人为因素",
+      "functional": false
+    }}
+  ]
 }}
 """
+
 
 # ========== P4：文献驱动模式补充 ==========
 P4_AUGMENT_PROMPT = """
 你是一名水旱灾害知识图谱本体工程师，现有模式如下：
 {schema_json}
 
-下面的文本可能包含尚未覆盖的重要概念或关系，请给出补充建议：
+下面的文本可能包含尚未覆盖的重要概念或关系，请在现有模式基础上给出「补充建议」，而不是完全重写。
+
+待分析文本：
 \"\"\"{doc_text}\"\"\"
 
-输出 JSON：
+---
+
+任务说明：
+
+1. 从文本中识别出当前 TBox 中尚未很好覆盖的「候选类、关系或属性」。
+2. 对每个补充建议，给出：
+   - type: "class" | "relation" | "attribute"
+   - name: 英文名（类名/关系名/属性名）
+   - cn_name: 中文名
+   - definition: 简要中文定义（对于关系，可说明主语宾语及语义）
+   - parent_or_domain_range_or_owner:
+     - 若 type = "class"：填该类的父类英文名（若不确定，可填 "DisasterEvent" 或 "null"）
+     - 若 type = "relation"：填 "DomainClass -> RangeClass" 形式的字符串，例如：
+       - "DisasterEvent -> EmergencyMeasure"
+     - 若 type = "attribute"：填该属性所属的类名，例如：
+       - "DisasterEvent"
+   - value_type:
+     - 若 type = "class" 或 "relation"，固定填 "null"
+     - 若 type = "attribute"，从以下枚举中选择："string", "number", "integer", "float", "boolean", "datetime"
+   - evidence:
+     - 从原文中复制能支撑该建议的一句话或一个短语（中文）
+
+---
+
+输出格式要求：
+
+1. 仅输出一个 JSON 对象，不要输出额外文字。
+2. 顶层必须包含字段 "suggestions"，其值是一个数组（可以为空数组）。
+3. "suggestions" 中每个元素必须包含字段：
+   - "type"
+   - "name"
+   - "cn_name"
+   - "definition"
+   - "parent_or_domain_range_or_owner"
+   - "value_type"
+   - "evidence"
+
+参考输出结构示例（内容仅供参考）：
 {{
   "suggestions": [
     {{
-      "type": "class|relation|attribute",
-      "name": "...",
-      "cn_name": "...",
-      "definition": "...",
-      "parent_or_domain_range_or_owner": "...",
-      "value_type": "string|number|datetime|null",
-      "evidence": "原文句子"
+      "type": "class",
+      "name": "EmergencyPlan",
+      "cn_name": "应急预案",
+      "definition": "在灾害发生前预先编制的应对洪水或干旱事件的行动和处置方案",
+      "parent_or_domain_range_or_owner": "ManagementDocument",
+      "value_type": "null",
+      "evidence": "……启动防汛应急预案……"
+    }},
+    {{
+      "type": "relation",
+      "name": "triggers_emergency_response",
+      "cn_name": "触发应急响应",
+      "definition": "描述某个阈值条件或事件触发某级别应急响应的关系",
+      "parent_or_domain_range_or_owner": "ThresholdCondition -> EmergencyResponseLevel",
+      "value_type": "null",
+      "evidence": "……当水位达到警戒水位以上时，启动Ⅳ级应急响应……"
+    }},
+    {{
+      "type": "attribute",
+      "name": "emergency_level",
+      "cn_name": "应急响应级别",
+      "definition": "表示应急响应的等级，如I级、II级、III级、IV级",
+      "parent_or_domain_range_or_owner": "EmergencyResponse",
+      "value_type": "string",
+      "evidence": "……启动防汛II级应急响应……"
     }}
   ]
 }}
 """
 
+
 # ========== P5：事件与三元组抽取 ==========
-EVENT_SCHEMA_HINT = """
+P5_EXTRACTION_PROMPT = """
+你是一名面向水旱灾害的知识图谱构建助手。
+
+TBox 定义（classes / relations / attributes）：
+{schema_json}
+
+事件 Schema 参考（用于组织输出结构）：
+{event_schema}
+
+---
+
+任务说明：
+
+1. 阅读下面的文本，识别其中的 0~N 个灾害事件（如某次洪水或干旱过程），并为每个事件构建一个结构化对象。
+   - event_type 必须使用 TBox.classes.name 中已有的某个类名，例如 "FloodEvent", "DroughtEvent"。
+   - 若无法确定具体子类，可以使用更上层的类，如 "DisasterEvent"。
+
+2. 在 TBox 约束下抽取三元组（triples）：
+   - subject 和 object 通常是事件名、地名、致灾因子等实体（用中文字符串表示，与原文风格一致）；
+   - predicate 必须来自 TBox.relations.name 中已有的某个关系名（如 "has_cause", "affects_region"）；
+   - 可以根据需要附带 event_id（若该三元组与某个事件强相关）和 evidence（原文中的支撑句）。
+
+---
+
+输出格式要求：
+
+1. 仅输出一个 JSON 对象，不要输出任何额外文字。
+2. 顶层必须包含字段：
+   - "events": 数组
+   - "triples": 数组
+
+3. "events" 中每个元素建议包含字段（可为空字符串或空数组，但字段必须存在）：
+   - "event_id": string，例如 "evt_1998_01"
+   - "event_type": string，来自 TBox.classes.name
+   - "name": string，事件中文名称
+   - "time": {{
+       "start_time": "YYYY-MM-DD" 或 "",
+       "end_time": "YYYY-MM-DD" 或 ""
+     }}
+   - "space": {{
+       "main_stream": string 数组,
+       "tributaries": string 数组,
+       "provinces": string 数组
+     }}
+   - "causes": string 数组
+   - "impacts": {{
+       "affected_population": string,
+       "deaths": string,
+       "direct_economic_loss": string
+     }}
+   - "responses": 数组，每个元素为：
+     {{
+       "stage": "防御准备" | "应急响应" | "恢复重建" | "其他",
+       "measures": string 数组
+     }}
+   - "source": string，例如文献或数据来源名，若未知可写 ""。
+
+4. "triples" 中每个元素必须包含字段：
+   - "subject": string
+   - "predicate": string（来自 TBox.relations.name）
+   - "object": string
+   - "event_id": string 或 ""（若该三元组与某个事件关联，则填写对应 event_id）
+   - "evidence": string（从原文复制的支撑句，若不方便可写空字符串）
+
+参考输出结构示例（内容仅供参考）：
 {{
-  "event_id": "evt_年份_序号",
-  "event_type": "TBox 中的类名，如 FloodEvent 或 DroughtEvent",
-  "name": "事件中文名称",
-  "time": {{"start_time": "YYYY-MM-DD", "end_time": "YYYY-MM-DD"}},
-  "space": {{
-    "main_stream": ["主要干流"],
-    "tributaries": ["受影响支流或湖泊"],
-    "provinces": ["主要受灾省份"]
-  }},
-  "causes": ["致灾因子列表"],
-  "impacts": {{
-    "affected_population": "受灾人口（原文表述）",
-    "deaths": "死亡人数",
-    "direct_economic_loss": "直接经济损失（原文表述）"
-  }},
-  "responses": [{{"stage": "防御准备/应急响应/恢复重建", "measures": ["措施列表"]}}],
-  "source": "数据来源"
+  "events": [
+    {{
+      "event_id": "evt_1998_01",
+      "event_type": "FloodEvent",
+      "name": "1998年长江特大洪水",
+      "time": {{"start_time": "1998-06-01", "end_time": "1998-09-01"}},
+      "space": {{
+        "main_stream": ["长江中下游干流"],
+        "tributaries": ["洞庭湖", "鄱阳湖"],
+        "provinces": ["湖北省", "湖南省", "江西省", "安徽省", "江苏省"]
+      }},
+      "causes": ["持续性强降雨", "上游来水偏多", "两湖来水与干流洪水叠加"],
+      "impacts": {{
+        "affected_population": "全国受灾人口 2.23 亿人",
+        "deaths": "死亡 4150 人",
+        "direct_economic_loss": "直接经济损失约 1660 亿元"
+      }},
+      "responses": [
+        {{
+          "stage": "应急响应",
+          "measures": ["启动防汛Ⅱ级应急响应", "启动防汛Ⅰ级应急响应", "启用部分分洪蓄滞洪区", "大规模巡堤查险和抢险救援"]
+        }}
+      ],
+      "source": "长江流域洪水公报或相关文献"
+    }}
+  ],
+  "triples": [
+    {{
+      "subject": "1998年长江特大洪水",
+      "predicate": "has_cause",
+      "object": "持续性强降雨",
+      "event_id": "evt_1998_01",
+      "evidence": "1998年，受流域范围内持续性强降雨和上游来水偏多影响，长江中下游干流水位长期高于警戒……"
+    }},
+    {{
+      "subject": "1998年长江特大洪水",
+      "predicate": "affects_region",
+      "object": "长江中下游干流",
+      "event_id": "evt_1998_01",
+      "evidence": "长江中下游干流水位长期高于警戒……"
+    }}
+  ]
 }}
 """
 
-P5_EXTRACTION_PROMPT = """
-你是一名面向水旱灾害的知识图谱构建助手。
-TBox 定义：
-{schema_json}
-
-事件 Schema 参考：
-{event_schema}
-
-请阅读下面的文本，抽取 0~N 个灾害事件，并输出 events 与 triples。
-要求：
-* event_type 必须来自 TBox.classes.name
-* predicate 必须来自 TBox.relations.name
-* 仅输出 JSON:
-{{
-  "events": [...],
-  "triples": [...]
-}}
-
-文本：
-\"\"\"{paragraph}\"\"\"
+EVENT_SCHEMA_HINT = """
+{
+  "event_id": "evt_年份_序号",
+  "event_type": "TBox 中的类名，如 FloodEvent 或 DroughtEvent",
+  "name": "事件中文名称",
+  "time": {"start_time": "YYYY-MM-DD", "end_time": "YYYY-MM-DD"},
+  "space": {
+    "main_stream": ["主要干流"],
+    "tributaries": ["受影响支流或湖泊"],
+    "provinces": ["主要受灾省份"]
+  },
+  "causes": ["致灾因子列表"],
+  "impacts": {
+    "affected_population": "受灾人口（原文表述）",
+    "deaths": "死亡人数",
+    "direct_economic_loss": "直接经济损失（原文表述）"
+  },
+  "responses": [{"stage": "防御准备/应急响应/恢复重建", "measures": ["措施列表"]}],
+  "source": "数据来源"
+}
 """
 
 
