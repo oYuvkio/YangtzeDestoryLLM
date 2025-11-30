@@ -139,7 +139,7 @@ class CQLLMPipeline:
     - extract_events      (P5)
     """
 
-    def __init__(self, llm_config: Optional[Dict[str, Any]] = None, output_dir: str = "outputs/cq_pipeline"):
+    def __init__(self, llm_config: Optional[Dict[str, Any]] = None, output_dir: str = "outputs/cq_pipeline/final"):
         config = llm_config or {
             "provider": "openai",
             "model_name": "gpt-4o-mini",
@@ -587,7 +587,7 @@ def run_quick_demo() -> None:
     P3-Norm 规范化 -> P4 文献增强 -> P5 抽取事件。
     """
     pipeline = CQLLMPipeline()
-    out_dir = Path("outputs/cq_pipeline")
+    out_dir = Path("outputs/cq_pipeline/final")
 
     # ---------- 1. 读取已生成的文件 ----------
     # P1 训练 CQ（仅用于统计）

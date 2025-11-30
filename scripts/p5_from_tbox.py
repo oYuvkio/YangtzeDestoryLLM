@@ -7,10 +7,10 @@
 
 示例：
     python scripts/p5_from_tbox.py \
-        --tbox-file outputs/cq_pipeline/p3_refined_schema.json \
+        --tbox-file outputs/cq_pipeline/final/p4_tbox_augmented.json \
         --paragraph-file data/raw/sample_paragraph.txt \
         --provider openai --model gpt-4o-mini \
-        --out outputs/cq_pipeline/p5_from_p3.json
+        --out outputs/cq_pipeline/final/p5_from_tbox.json
 """
 import argparse
 import json

@@ -34,7 +34,7 @@ python scripts/run_cq_pipeline.py --provider openai --model gpt-4o-mini --n-cq 1
 python scripts/run_cq_pipeline.py --provider zhipu --model glm-4.5-flash
 ```
 
-输出会写入 `outputs/cq_pipeline/`，包含：
+输出会写入 `outputs/cq_pipeline/final/`，包含：
 - `p1_cqs.json`：能力问题列表；
 - `p2_tbox_init.json`：初始 TBox；
 - `p5_events.json`：在 TBox 约束下抽取的事件与三元组（默认使用 1998 洪水示例段落）。

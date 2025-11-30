@@ -38,7 +38,7 @@ def main() -> None:
                         default=0.1, help="采样温度，建议 JSON 模式保持较低")
     parser.add_argument("--n-cq", type=int, default=10, help="生成 CQ 的数量")
     parser.add_argument(
-        "--output-dir", default="outputs/cq_pipeline", help="结果保存目录")
+        "--output-dir", default="outputs/cq_pipeline/final", help="结果保存目录（默认写入 final 目录）")
 
     args = parser.parse_args()
 
