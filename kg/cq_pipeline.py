@@ -145,6 +145,7 @@ class CQLLMPipeline:
             "model_name": "gpt-4o-mini",
             "temperature": 0.1,
         }
+        self.llm_config = config  # 保存配置，便于日志/调试
         self.llm = LLMFactory.create(config)
         self.client = LLMJsonClient(self.llm)
         self.output_dir = Path(output_dir)

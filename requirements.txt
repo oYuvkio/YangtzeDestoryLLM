@@ -3,3 +3,12 @@ pandas
 scikit-learn
 rank-bm25
 pyyaml
+sentence-transformers
+python-dotenv
+zhipuai
+google-generativeai
+openai
+jieba
+neo4j
+tqdm
+PyPDF2

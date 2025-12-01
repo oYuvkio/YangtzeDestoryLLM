@@ -47,6 +47,7 @@ def main() -> None:
         "model_name": args.model or ("gpt-4o-mini" if args.provider == "openai" else "glm-4.5-flash"),
         "temperature": args.temperature,
     }
+    print(f"[LLM][P1-2-5] provider={llm_config['provider']}, model={llm_config['model_name']}, temperature={llm_config['temperature']}")
 
     domain_desc = read_text_if_provided(args.domain_file, DEMO_DOMAIN_DESC)
     paragraph = read_text_if_provided(args.paragraph_file, DEMO_PARAGRAPH_1998)

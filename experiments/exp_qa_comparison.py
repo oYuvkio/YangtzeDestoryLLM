@@ -46,7 +46,9 @@ def get_baseline_answer(question, retriever, cfg):
 
     # 3. LLM 生成
     prompt = f"基于以下背景信息回答问题：\n{context_text}\n\n问题：{question}"
-    llm = LLMFactory.create(cfg.get("llm", {}))
+    llm_cfg = cfg.get("llm", {})
+    print(f"[LLM][Baseline] provider={llm_cfg.get('provider', 'unknown')}, model={llm_cfg.get('model_name', 'default')}")
+    llm = LLMFactory.create(llm_cfg)
 
     answer = llm.chat(prompt, system_prompt="你是一个基于知识图谱的灾害问答专家。")
     return answer, [h[0] for h in hits]  # 返回答案和检索到的原始数据
@@ -79,7 +81,9 @@ def get_graphrag_answer(question, vector_retriever, graph, cfg):
 
     # 4. LLM 生成
     prompt = f"基于以下知识图谱结构化数据回答问题：\n{context_text}\n\n问题：{question}"
-    llm = LLMFactory.create(cfg.get("llm", {}))
+    llm_cfg = cfg.get("llm", {})
+    print(f"[LLM][GraphRAG] provider={llm_cfg.get('provider', 'unknown')}, model={llm_cfg.get('model_name', 'default')}")
+    llm = LLMFactory.create(llm_cfg)
 
     answer = llm.chat(prompt, system_prompt="你是一个基于知识图谱的灾害问答专家。")
     return answer, evidence_triples
@@ -91,7 +95,7 @@ def run_qa_experiment():
 
     # 0. 加载配置
     cfg = load_config()
-    print(f"已加载配置，LLM 提供商: {cfg['llm'].get('provider', 'unknown')}")
+    print(f"[LLM][QA] provider={cfg['llm'].get('provider', 'unknown')}, model={cfg['llm'].get('model_name', 'default')}")
 
     # 1. 准备路径
     data_path = os.path.join(project_root, "data",

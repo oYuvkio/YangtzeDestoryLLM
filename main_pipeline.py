@@ -18,6 +18,7 @@ RAW_DOC = """
 
 def main():
     """串联知识抽取、图谱构建与问答的示例入口。"""
+    print("[LLM][Pipeline] 默认使用 LLMExtractor 内置配置（见 kg/extractor.py），若需切换请修改 llm_config。")
     print("="*20 + " 阶段一：基于LLM的知识抽取 (创新点1) " + "="*20)
     extractor = KnowledgeExtractor()
     kg_data = extractor.extract(RAW_DOC)

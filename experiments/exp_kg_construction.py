@@ -50,7 +50,7 @@ def run_extraction_experiment(args):
 
     # 1. 加载配置
     cfg = load_config(args.config)
-    print(f"已加载配置，使用模型: {cfg['llm'].get('model_name', 'default')}")
+    print(f"[LLM][Extraction] provider={cfg['llm'].get('provider', 'unknown')}, model={cfg['llm'].get('model_name', 'default')}")
 
     # 2. 准备数据
     test_docs = []
