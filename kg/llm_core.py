@@ -33,6 +33,14 @@ except Exception:
     OpenAI = None  # type: ignore
 
 
+class RateLimitError(Exception):
+    """表示触发平台限流的异常。"""
+
+
+class AccountBlockedError(Exception):
+    """表示账号被封禁/需人工处理的异常（如 401）。"""
+
+
 # 1. 定义抽象策略接口
 class LLMBackend(ABC):
     """不同 LLM 平台需要实现的统一对话接口。"""
@@ -74,12 +82,16 @@ class ZhipuBackend(LLMBackend):
         if ZhipuAI is None:
             raise ImportError("未安装 zhipuai 库，请先 pip install zhipuai")
 
-        api_key = os.getenv("ZHIPU_API_KEY")
+        api_key = config.get("api_key") or os.getenv("ZHIPU_API_KEY") or os.getenv("LLM_API_KEY")
         if not api_key:
-            raise ValueError("❌ 未找到 ZHIPU_API_KEY，请检查 .env 文件")
+            raise ValueError("❌ 未找到智谱 API Key，请在 .env 配置 ZHIPU_API_KEY 或通用 LLM_API_KEY")
         self.client = ZhipuAI(api_key=api_key)
         self.model = config.get("model_name", "glm-4.5-flash")
         self.default_temp = config.get("temperature", 0.1)
+        # GLM 深度思考模式控制（enabled/disabled），默认遵循接口动态策略
+        self.thinking_type = config.get("thinking_type")  # None / "enabled" / "disabled"
+        # 是否流式，默认 False；若 True，将聚合流式片段返回
+        self.stream = bool(config.get("stream", False))
 
     def chat(
         self,
@@ -114,9 +126,25 @@ class ZhipuBackend(LLMBackend):
                 messages=messages,
                 temperature=self.default_temp if not json_mode else 0.1,
                 response_format=fmt,
+                thinking={"type": self.thinking_type} if self.thinking_type else None,
+                stream=self.stream,
             )
+            if self.stream:
+                chunks = []
+                for chunk in response:
+                    if hasattr(chunk.choices[0], "delta") and chunk.choices[0].delta.content:
+                        chunks.append(chunk.choices[0].delta.content)
+                    elif chunk.choices[0].message and chunk.choices[0].message.content:
+                        chunks.append(chunk.choices[0].message.content)
+                return "".join(chunks)
             return response.choices[0].message.content
         except Exception as e:
+            msg = str(e)
+            if "429" in msg or "rate limit" in msg.lower():
+                raise RateLimitError(msg)
+            if "401" in msg:
+                # 对于智谱，401 通常意味着账号/Key 出现封禁或权限问题，需要人工介入
+                raise AccountBlockedError(msg)
             print(f"⚠️ Zhipu API Error: {e}")
             return ""
 
@@ -130,9 +158,9 @@ class GeminiBackend(LLMBackend):
             raise ImportError(
                 "未安装 google-generativeai，请先 pip install google-generativeai")
 
-        api_key = os.getenv("GEMINI_API_KEY")
+        api_key = config.get("api_key") or os.getenv("GEMINI_API_KEY") or os.getenv("LLM_API_KEY")
         if not api_key:
-            raise ValueError("❌ 未找到 GEMINI_API_KEY，请检查 .env 文件")
+            raise ValueError("❌ 未找到 GEMINI_API_KEY 或通用 LLM_API_KEY，请检查 .env 文件")
         genai.configure(api_key=api_key)
         model_name = config.get("model_name", "gemini-2.5-flash")
         self.model = genai.GenerativeModel(model_name)
@@ -176,6 +204,9 @@ class GeminiBackend(LLMBackend):
                 full_prompt, generation_config=config)
             return response.text
         except Exception as e:
+            msg = str(e)
+            if "429" in msg or "rate limit" in msg.lower():
+                raise RateLimitError(msg)
             print(f"⚠️ Gemini API Error: {e}")
             return ""
 
@@ -188,12 +219,12 @@ class OpenAIBackend(LLMBackend):
         if OpenAI is None:
             raise ImportError("未安装 openai，请先 pip install openai")
 
-        api_key = os.getenv("OPENAI_API_KEY")
+        api_key = config.get("api_key") or os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")
         if not api_key:
-            raise ValueError("❌ 未找到 OPENAI_API_KEY，请检查 .env 文件")
-        model = os.getenv("OPENAI_MODEL_API")
+            raise ValueError("❌ 未找到 OPENAI_API_KEY 或通用 LLM_API_KEY，请检查 .env 文件")
+        model = config.get("model_name") or os.getenv("OPENAI_MODEL_API")
         if not model:
-            raise ValueError("❌ 未找到 OPENAI_MODEL_API，请检查 .env 文件")
+            raise ValueError("❌ 未找到模型名称，请通过 llm_config.model_name 或 OPENAI_MODEL_API 指定")
         base_url = config.get("base_url") or os.getenv("OPENAI_BASE_URL")
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
@@ -230,6 +261,9 @@ class OpenAIBackend(LLMBackend):
             )
             return completion.choices[0].message.content
         except Exception as e:
+            msg = str(e)
+            if "429" in msg or "rate limit" in msg.lower():
+                raise RateLimitError(msg)
             print(f"⚠️ OpenAI API Error: {e}")
             return ""
 
@@ -249,6 +283,12 @@ class LLMFactory:
         """
         provider = llm_config.get(
             "provider", os.getenv("LLM_PROVIDER", "zhipu"))
+
+        model_name = llm_config.get("model_name") or os.getenv(
+            "OPENAI_MODEL_API") or llm_config.get("model")
+        thinking = llm_config.get("thinking_type")
+        stream = llm_config.get("stream")
+        print(f"[LLM] init provider={provider}, model={model_name}, thinking={thinking}, stream={stream}")
 
         if provider == "zhipu":
             return ZhipuBackend(llm_config)

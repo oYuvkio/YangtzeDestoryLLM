@@ -12,3 +12,5 @@ jieba
 neo4j
 tqdm
 PyPDF2
+feedparser
+beautifulsoup4

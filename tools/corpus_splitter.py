@@ -1,6 +1,7 @@
 """
 P4语料批量清洗工具 v2.0
 优化：智能去噪、语义切分、多引擎支持、并行处理
+新增：可选元数据提取（source_type/year/title/url/province/river），可拼接到文件名，便于溯源。
 """
 from __future__ import annotations
 
@@ -22,6 +23,12 @@ class DocumentMeta:
     total_parts: int
     char_count: int
     md5_hash: str  # 用于去重
+    source_type: str = ""
+    year: str = ""
+    title: str = ""
+    url: str = ""
+    province: str = ""
+    river: str = ""
 
 
 # ==================== PDF解析引擎 ====================
@@ -440,16 +447,67 @@ def compute_md5(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
 
 
+PROVINCES = [
+    "北京", "天津", "上海", "重庆", "河北", "山西", "内蒙古", "辽宁", "吉林", "黑龙江",
+    "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南", "广东",
+    "广西", "海南", "四川", "贵州", "云南", "西藏", "陕西", "甘肃", "青海", "宁夏", "新疆",
+    "香港", "澳门", "台湾"
+]
+
+RIVERS = [
+    "长江", "汉江", "嘉陵江", "乌江", "洞庭湖", "鄱阳湖", "太湖", "三峡", "金沙江", "岷江",
+    "湘江", "赣江", "黄河"
+]
+
+
+def extract_meta_from_name(stem: str, default_source: str = "", default_url: str = "") -> Dict[str, str]:
+    """
+    依据文件名粗略提取元数据：year/province/river/title。
+    - year：优先匹配 19xx/20xx
+    - province/river：简单包含匹配
+    """
+    year_match = re.search(r"(19|20)\d{2}", stem)
+    year = year_match.group(0) if year_match else ""
+    province = next((p for p in PROVINCES if p in stem), "")
+    river = next((r for r in RIVERS if r in stem), "")
+    title = stem
+    return {
+        "source_type": default_source,
+        "year": year,
+        "title": title,
+        "url": default_url,
+        "province": province,
+        "river": river,
+    }
+
+
+def build_name_with_meta(stem: str, meta: Dict[str, str]) -> str:
+    """
+    将元数据拼到文件名中，格式：stem__src-...__year-...__prov-...__river-...
+    只拼接非空字段，避免过长。
+    """
+    parts = [stem]
+    for key in ["source_type", "year", "province", "river"]:
+        val = meta.get(key, "")
+        if val:
+            safe_val = re.sub(r"[\\/:*?\"<>|\\s]+", "_", val)
+            parts.append(f"{key}-{safe_val}")
+    return "__".join(parts)
+
+
 def write_parts(parts: List[str], out_dir: Path, stem: str,
-                source_file: str, rel_dir: Optional[Path] = None) -> List[Tuple[Path, DocumentMeta]]:
+                source_file: str, rel_dir: Optional[Path] = None,
+                meta_extra: Optional[Dict[str, str]] = None) -> List[Tuple[Path, DocumentMeta]]:
     """
     写入切分后的文件，附带元数据。
     rel_dir 用于保留相对目录结构，例如年鉴/2019/xxx.txt -> output/年鉴/2019/xxx_part01.txt
+    meta_extra：附加的源/年份/省份等元数据。
     """
     target_dir = out_dir / rel_dir if rel_dir else out_dir
     target_dir.mkdir(parents=True, exist_ok=True)
     written = []
     total = len(parts)
+    meta_extra = meta_extra or {}
 
     for idx, chunk in enumerate(parts, start=1):
         # 生成元数据
@@ -458,15 +516,23 @@ def write_parts(parts: List[str], out_dir: Path, stem: str,
             part_index=idx,
             total_parts=total,
             char_count=len(chunk),
-            md5_hash=compute_md5(chunk)
+            md5_hash=compute_md5(chunk),
+            source_type=meta_extra.get("source_type", ""),
+            year=meta_extra.get("year", ""),
+            title=meta_extra.get("title", ""),
+            url=meta_extra.get("url", ""),
+            province=meta_extra.get("province", ""),
+            river=meta_extra.get("river", ""),
         )
 
+        name_base = build_name_with_meta(f"{stem}_part{idx:02d}", meta_extra)
+
         # 写入文本
-        out_path = target_dir / f"{stem}_part{idx:02d}.txt"
+        out_path = target_dir / f"{name_base}.txt"
         out_path.write_text(chunk, encoding="utf-8")
 
         # 写入元数据（JSON sidecar）
-        meta_path = target_dir / f"{stem}_part{idx:02d}.meta.json"
+        meta_path = target_dir / f"{name_base}.meta.json"
         meta_path.write_text(json.dumps(asdict(meta), ensure_ascii=False, indent=2),
                              encoding="utf-8")
 
@@ -479,7 +545,8 @@ def write_parts(parts: List[str], out_dir: Path, stem: str,
 
 def process_file(path: Path, out_dir: Path,
                  cleaner: TextCleaner, splitter: SmartSplitter,
-                 pdf_engine: str = "auto", rel_dir: Optional[Path] = None) -> List[Tuple[Path, DocumentMeta]]:
+                 pdf_engine: str = "auto", rel_dir: Optional[Path] = None,
+                 meta_extra: Optional[Dict[str, str]] = None) -> List[Tuple[Path, DocumentMeta]]:
     """处理单个文件"""
     # 1. 提取文本
     raw_text = extract_text(path, pdf_engine=pdf_engine)
@@ -495,7 +562,7 @@ def process_file(path: Path, out_dir: Path,
     parts = splitter.split(clean_text)
 
     # 5. 写入
-    return write_parts(parts, out_dir, path.stem, str(path.name), rel_dir=rel_dir)
+    return write_parts(parts, out_dir, path.stem, str(path.name), rel_dir=rel_dir, meta_extra=meta_extra)
 
 
 def iter_input_files(src: Path) -> Iterable[Path]:
@@ -520,7 +587,8 @@ def iter_input_files(src: Path) -> Iterable[Path]:
 def process_batch(files: List[Path], out_dir: Path,
                   cleaner: TextCleaner, splitter: SmartSplitter,
                   pdf_engine: str = "auto", max_workers: int = 4,
-                  src_root: Optional[Path] = None) -> Dict:
+                  src_root: Optional[Path] = None,
+                  meta_defaults: Optional[Dict[str, str]] = None) -> Dict:
     """批量处理（支持并行）"""
     results = {
         "success": [],
@@ -529,14 +597,16 @@ def process_batch(files: List[Path], out_dir: Path,
         "total_parts": 0
     }
 
-    def process_one(f: Path, root: Path):
+    def process_one(f: Path, root: Path, meta_defaults: Dict[str, str]):
         try:
             try:
                 rel_dir = f.parent.relative_to(root)
             except ValueError:
                 rel_dir = None
+            meta_extra = extract_meta_from_name(f.stem, default_source=meta_defaults.get("source_type", ""),
+                                                default_url=meta_defaults.get("url", ""))
             written = process_file(f, out_dir, cleaner, splitter,
-                                   pdf_engine, rel_dir=rel_dir)
+                                   pdf_engine, rel_dir=rel_dir, meta_extra=meta_extra)
             return ("success", f, written)
         except NotImplementedError as e:
             return ("skipped", f, str(e))
@@ -546,7 +616,8 @@ def process_batch(files: List[Path], out_dir: Path,
     # 使用线程池并行处理
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         root = src_root or src
-        futures = {executor.submit(process_one, f, root): f for f in files}
+        futures = {executor.submit(
+            process_one, f, root, meta_defaults or {}): f for f in files}
         for future in as_completed(futures):
             status, path, data = future.result()
             if status == "success":
@@ -590,6 +661,9 @@ def main():
                         help="禁用章节智能切分，仅按长度切分")
     parser.add_argument("--workers", type=int, default=4,
                         help="并行处理线程数，默认 4")
+    parser.add_argument("--source-type", default="",
+                        help="源类型（如 年鉴/公报/预案/新闻），用于文件名与元数据")
+    parser.add_argument("--default-url", default="", help="默认 URL（可空），用于元数据")
 
     args = parser.parse_args()
 
@@ -631,8 +705,9 @@ def main():
     print(f"=" * 60)
 
     # 批量处理
+    meta_defaults = {"source_type": args.source_type, "url": args.default_url}
     results = process_batch(files, out_dir, cleaner, splitter,
-                            args.pdf_engine, args.workers, src_root=src)
+                            args.pdf_engine, args.workers, src_root=src, meta_defaults=meta_defaults)
 
     # 输出统计
     print(f"\n{'=' * 60}")
