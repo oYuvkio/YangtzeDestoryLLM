@@ -30,6 +30,8 @@ import json
 from pathlib import Path
 from typing import Optional, List, Dict
 
+import yaml
+
 from kg.cq_pipeline import (
     CQLLMPipeline,
     TBoxSchema,
@@ -37,6 +39,7 @@ from kg.cq_pipeline import (
     RelationDef,
     AttributeDef,
 )
+from kg.utils.entity_linking import normalize_extraction_result
 
 
 def load_tbox(tbox_path: Path) -> TBoxSchema:
@@ -103,25 +106,30 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="在规范化 TBox 约束下执行 P5 事件与三元组抽取（支持批量与断点续跑）")
     parser.add_argument(
+        "--cfg",
+        default="configs/cfg.yaml",
+        help="默认配置文件，命令行优先级最高",
+    )
+    parser.add_argument(
         "--tbox-file",
-        default="outputs/kg/final/p4_tbox_augmented.json",
-        help="包含 classes/relations/attributes 的 TBox JSON 路径（默认使用 outputs/kg/final/p4_tbox_augmented.json）",
+        default=None,
+        help="包含 classes/relations/attributes 的 TBox JSON 路径（默认读 cfg.paths.p4_final_dir/p4_tbox_augmented.json）",
     )
     parser.add_argument("--paragraph-file", help="待抽取文本文件路径；缺省时从 stdin 读取")
     parser.add_argument("--corpus-dir", help="批量处理的目录（递归扫描 *.txt）")
-    parser.add_argument("--provider", default="openai",
-                        choices=["openai", "zhipu", "gemini"], help="LLM 提供商")
+    parser.add_argument("--provider", default=None,
+                        choices=["openai", "zhipu", "gemini"], help="LLM 提供商（默认读 cfg.llm.provider）")
     parser.add_argument("--model", default=None,
-                        help="模型名称，不填则使用各 provider 推荐默认值")
+                        help="模型名称，不填则读 cfg.llm.model_name 或 provider 默认值")
     parser.add_argument("--temperature", type=float,
-                        default=0.1, help="采样温度，建议 JSON 模式保持较低")
+                        default=None, help="采样温度，建议 JSON 模式保持较低（默认读 cfg.llm.temperature 或 0.1）")
     parser.add_argument(
         "--out",
-        default="outputs/kg/final/p5_from_tbox.json",
-        help="输出 JSON 路径（默认写入 outputs/kg/final）",
+        default=None,
+        help="输出 JSON 路径（默认写入 cfg.paths.output_dir/p5_from_tbox.json）",
     )
-    parser.add_argument("--output-dir", default="outputs/kg/final/p5_batch",
-                        help="批量模式下的输出目录（默认 outputs/kg/final/p5_batch）")
+    parser.add_argument("--output-dir", default=None,
+                        help="批量模式下的输出目录（默认 cfg.paths.output_dir/p5_batch）")
     parser.add_argument("--overwrite", action="store_true",
                         help="覆盖已存在的 per-file 输出（默认跳过已完成文件）")
     parser.add_argument("--rerun-empty", action="store_true",
@@ -130,20 +138,60 @@ def main() -> None:
                         help="批量模式下最多处理的文件数（用于小样本/配额控制）")
     parser.add_argument("--split-long", action="store_true",
                         help="自动切分过长文本（默认开启）")
-    parser.add_argument("--min-chars", type=int, default=800,
-                        help="切分后单段最小字符数，默认 800")
-    parser.add_argument("--max-chars", type=int, default=2500,
-                        help="切分后单段最大字符数，默认 2500")
+    parser.add_argument("--min-chars", type=int, default=None,
+                        help="切分后单段最小字符数，默认读 cfg.p5.min_chars 或 800")
+    parser.add_argument("--max-chars", type=int, default=None,
+                        help="切分后单段最大字符数，默认读 cfg.p5.max_chars 或 2500")
+    parser.add_argument("--favor-existing-classes", action="store_true",
+                        help="提示优先使用已有类（保守模式），默认读 cfg.p5.favor_existing_classes")
+    parser.add_argument("--normalize-entities", action="store_true",
+                        help="抽取后对事件/三元组做实体标准化，默认读 cfg.p5.normalize_entities")
     args = parser.parse_args()
 
-    tbox_path = Path(args.tbox_file)
+    cfg = {}
+    if args.cfg:
+        cfg_path = Path(args.cfg)
+        if cfg_path.exists():
+            try:
+                cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                cfg = {}
+
+    def pick(*vals, default=None):
+        for v in vals:
+            if v not in [None, ""]:
+                return v
+        return default
+
+    cfg_paths = cfg.get("paths", {}) if isinstance(cfg, dict) else {}
+    cfg_llm = cfg.get("llm", {}) if isinstance(cfg, dict) else {}
+    cfg_p5 = cfg.get("p5", {}) if isinstance(cfg, dict) else {}
+
+    provider = pick(args.provider, cfg_llm.get("provider"), "openai")
+    model_name = pick(args.model, cfg_llm.get("model_name"),
+                      "gpt-4o-mini" if provider == "openai" else "glm-4.5-flash")
+    temperature = pick(args.temperature, cfg_llm.get("temperature"), 0.1)
+    out_single = pick(args.out, cfg_paths.get("output_dir") and str(
+        Path(cfg_paths.get("output_dir")) / "p5_from_tbox.json"), "outputs/kg/final/p5_from_tbox.json")
+    out_dir_default = pick(args.output_dir, cfg_paths.get("output_dir") and str(
+        Path(cfg_paths.get("output_dir")) / "p5_batch"), "outputs/kg/final/p5_batch")
+    favor_existing = pick(args.favor_existing_classes,
+                          cfg_p5.get("favor_existing_classes"), True)
+    normalize_entities = pick(args.normalize_entities, cfg_p5.get("normalize_entities"), False)
+    min_chars = pick(args.min_chars, cfg_p5.get("min_chars"), 800)
+    max_chars = pick(args.max_chars, cfg_p5.get("max_chars"), 2500)
+    tbox_default = Path(cfg_paths.get("p4_final_dir", cfg_paths.get(
+        "output_dir", "outputs/cq_pipeline/final"))) / "p4_tbox_augmented.json"
+
+    tbox_path = Path(args.tbox_file or tbox_default)
     if not tbox_path.exists():
         raise FileNotFoundError(f"TBox 文件不存在：{tbox_path}")
 
     llm_config = {
-        "provider": args.provider,
-        "model_name": args.model or ("gpt-4o-mini" if args.provider == "openai" else "glm-4.5-flash"),
-        "temperature": args.temperature,
+        "provider": provider,
+        "model_name": model_name,
+        "temperature": temperature,
+        "thinking_type": cfg_llm.get("thinking_type"),
     }
 
     print(f"加载 TBox: {tbox_path}")
@@ -159,16 +207,19 @@ def main() -> None:
     if not args.corpus_dir:
         paragraph = read_paragraph(args.paragraph_file)
         pipeline = CQLLMPipeline(
-            llm_config=llm_config, output_dir=Path(args.out).parent.as_posix())
-        parts = split_text(paragraph, args.min_chars,
-                           args.max_chars) if args.split_long else [paragraph]
+            llm_config=llm_config, output_dir=Path(out_single).parent.as_posix())
+        parts = split_text(paragraph, min_chars,
+                           max_chars) if args.split_long else [paragraph]
         print(f"执行 P5 抽取...（分段 {len(parts)} 段）")
         for i, part in enumerate(parts, start=1):
-            target = Path(args.out) if len(parts) == 1 else Path(
-                args.out).with_name(f"{Path(args.out).stem}_part{i:02d}.json")
+            target = Path(out_single) if len(parts) == 1 else Path(
+                out_single).with_name(f"{Path(out_single).stem}_part{i:02d}.json")
             try:
                 res = pipeline.extract_events(
-                    part, schema=tbox, save_path=target)
+                    part, schema=tbox, save_path=None, favor_existing_classes=bool(favor_existing))
+                if normalize_entities:
+                    res = normalize_extraction_result(res)
+                target.write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
                 print(
                     f"[P5] 段{i}/{len(parts)} 完成：事件 {len(res.get('events', []))}，三元组 {len(res.get('triples', []))}，保存至 {target}")
             except Exception as e:
@@ -179,7 +230,7 @@ def main() -> None:
 
     # 批量模式
     corpus_dir = Path(args.corpus_dir)
-    out_dir = Path(args.output_dir)
+    out_dir = Path(out_dir_default)
     out_dir.mkdir(parents=True, exist_ok=True)
     files = sorted(corpus_dir.rglob("*.txt"))
     if not files:

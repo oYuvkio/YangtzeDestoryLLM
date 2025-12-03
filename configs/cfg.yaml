@@ -1,23 +1,81 @@
-﻿# 定义所有超参数（路径、模型、检索K值、图跳数）
+# 通用配置：路径、模型、过滤与实验参数说明（命令行可覆盖）。
+# 每一项都标注了被哪个脚本/函数读取以及用途，便于维护与答辩说明。
 
-# 数据路径
-data_path: "data/processed/sample_events.jsonl"
-qa_path: "data/processed/qa_eval.jsonl"
+# 路径配置
+paths:
+  output_dir: "outputs/cq_pipeline/final"           # P1-P5 主输出目录；被 scripts/run_cq_pipeline.py、p5_from_tbox.py、run_full_evaluation.py 作为默认结果路径。
+  p4_corpus_dir: "data/enhancing_onto_corpus_docs"  # P4 文献增强语料目录；被 scripts/p4_enhance_onto.py -> CQLLMPipeline.run_p4_over_corpus 使用。
+  p4_process_dir: "outputs/cq_pipeline/process"     # P4 中间文件（per-doc 建议、聚合）输出目录；scripts/p4_enhance_onto.py 使用。
+  p4_final_dir: "outputs/cq_pipeline/final"         # P4 增强 TBox 输出目录；scripts/p4_enhance_onto.py 写入多版 TBox。
+  corpus_full: "data/corpus_for_kg/handled_all_kg_corpus"  # 全库语料（切分后）根目录；tools/filter_corpus_light.py、tools/build_eval_pool.py 读取。
+  light_pool: "data/corpus_for_kg/p5_corpus_filtered/light_pool.jsonl"  # 轻过滤输出 jsonl；tools/filter_corpus_light.py 默认写入。
+  eval_pool_dir: "data/p5_eval_pool"                # Eval Pool 输出目录（pool/dev/test）；tools/build_eval_pool.py 使用。
 
-# 图相关配置
-graph_hops: 2
-
-# 检索器配置
-retriever:
-  type: "vector" # 可选 "bm25" 或 "vector"
-  top_k: 3
-
-# LLM 配置 (核心修改)
 llm:
-  provider: "zhipu" # 可切换 "gemini"
-  model_name: "glm-4.5-flash"
-  temperature: 0.1
+  provider: "zhipu"                      # 默认 LLM 厂商（全局兜底）；被 run_cq_pipeline.py / p4_enhance_onto.py / p5_from_tbox.py / filter_corpus_light.py / build_eval_pool.py 等读取。
+  model_name: "glm-4.5-air"              # 默认模型名称（全局兜底）；同上。
+  temperature: 0.1                       # 默认温度，保持 JSON 稳定输出；同上。
+  thinking_type: "disabled"              # 仅 zhipu 支持的思考模式；同上。
 
-# Embedding 配置
+# 分阶段 LLM 配置（可选）：如果填写，则 P1–P5 优先使用对应配置；再回退到 llm 块，再回退到 CLI 默认
+llm_per_stage:
+  p1:
+    provider: "zhipu"                   # P1 生成/收集 CQ：run_cq_pipeline.py
+    model_name: "gpt-4o-mini"
+    temperature: 0.1
+  p2:
+    provider: "openai"                   # P2 CQ→初始 TBox：run_cq_pipeline.py
+    model_name: "gpt-4o-mini"
+    temperature: 0.1
+  p3:
+    provider: "zhipu"                    # P3 规范化/层次补充：run_cq_pipeline.py
+    model_name: "GLM-4.5-Air"
+    temperature: 0.0
+  p4:
+    provider: "zhipu"                    # P4 文献增强建议：p4_enhance_onto.py / run_cq_pipeline.py (如触发)
+    model_name: "GLM-4.5-Air"
+    temperature: 0.0
+  p5:
+    provider: "openai"                   # P5 抽取：p5_from_tbox.py / run_cq_pipeline.py (如触发)
+    model_name: "gpt-4o"
+    temperature: 0.0
+
 embedding:
-  model_name: "paraphrase-multilingual-MiniLM-L12-v2"
+  model_name: "BAAI/bge-base-zh-v1.5"    # 句向量模型，用于去重与 CQ 覆盖度；被 tools/deduplication.py、tools/cq_coverage.py 使用。
+
+filtering:
+  light:
+    min_cn_ratio: 0.2                    # 轻过滤最小汉字占比；tools/filter_corpus_light.py 用于粗过滤。
+    max_weird_ratio: 0.4                 # 轻过滤最大异常字符比例；tools/filter_corpus_light.py 用于粗过滤。
+  eval:
+    min_cn_ratio: 0.3                    # Eval Pool 最小汉字占比；tools/build_eval_pool.py 用于粗过滤。
+    max_weird_ratio: 0.3                 # Eval Pool 最大异常字符比例；tools/build_eval_pool.py 用于粗过滤。
+  keyword_filter: true                   # 是否启用关键词粗筛；filter_corpus_light.py/build_eval_pool.py 共同使用。
+
+eval_pool:
+  target:
+    law_plan: 60                         # Eval Pool 分层抽样：法案/预案类目标条数（tools/build_eval_pool.sample_by_category）。
+    gazette_yearbook: 80                 # Eval Pool 分层抽样：公报/年鉴类目标条数（tools/build_eval_pool.sample_by_category）。
+    case_paper: 100                      # Eval Pool 分层抽样：案例/论文类目标条数（tools/build_eval_pool.sample_by_category）。
+    news_popular: 60                     # Eval Pool 分层抽样：科普/新闻类目标条数（tools/build_eval_pool.sample_by_category）。
+  dev_ratio: 0.6                         # Eval Pool Dev/Test 划分比例（tools/build_eval_pool.split_dev_test）。
+
+# P4配置
+p4:
+  min_support: 2                         # 聚合建议的最低支持度；scripts/p4_enhance_onto.py -> CQLLMPipeline.run_p4_over_corpus。
+  allow_new_classes: false               # 合并时是否允许新增类；同上。
+  align_synonyms: false                  # 是否对建议名称做同义归一；同上，使用 kg.utils.schema_alignment。
+  dedup_with_embeddings: false           # 是否对新增类/关系做向量去重；同上，使用 kg.utils.deduplication。
+  dedup_threshold: 0.8                   # 去重相似度阈值；同上。
+
+# P5配置
+p5:
+  favor_existing_classes: true           # 抽取提示风格：优先复用已有类（保守）；run_cq_pipeline.py、p5_from_tbox.py 传入 extract_events。
+  normalize_entities: false              # 抽取后是否做实体标准化；run_cq_pipeline.py、p5_from_tbox.py 调用 kg.utils.entity_linking。
+  min_chars: 800                         # P5 分段最小长度（文本切分）；p5_from_tbox.py 使用。
+  max_chars: 2500                        # P5 分段最大长度（文本切分）；p5_from_tbox.py 使用。
+
+# 去重配置
+dedup_schema:
+  enabled: false                         # 在 P2/P3 后对类/关系做模式去重；run_cq_pipeline.py 使用 pipeline.deduplicate_tbox。
+  threshold: 0.75                        # 去重相似度阈值；同上。

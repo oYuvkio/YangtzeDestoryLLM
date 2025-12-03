@@ -4,6 +4,7 @@ scikit-learn
 rank-bm25
 pyyaml
 sentence-transformers
+numpy
 python-dotenv
 zhipuai
 google-generativeai

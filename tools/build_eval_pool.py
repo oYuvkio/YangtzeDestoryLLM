@@ -28,10 +28,17 @@ import random
 import re
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Iterable
+import sys
+import yaml
 
-from kg.llm_core import LLMFactory, AccountBlockedError, RateLimitError
-from kg.prompts import (
+# 确保脚本运行时能找到项目根下的 kg 包
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from kg.llm_core import LLMFactory, AccountBlockedError, RateLimitError  # noqa: E402
+from kg.prompts import (  # noqa: E402
     EVAL_SEGMENT_FILTER_SYSTEM,
     EVAL_SEGMENT_FILTER_USER_TEMPLATE,
 )
@@ -51,6 +58,10 @@ CategoryMap = {
     "新闻": "news_popular",
 }
 
+KEYWORDS_CORE = ["长江", "流域", "洪水", "干旱", "水旱",
+                 "防汛", "抗旱", "蓄滞洪区", "应急响应", "防洪", "枯水"]
+KEYWORDS_LAW = ["防汛", "抗旱", "应急", "预案", "响应"]
+
 
 @dataclass
 class Segment:
@@ -61,6 +72,48 @@ class Segment:
     text: str
     rel_path: str
     filter_decision: dict | None = None
+
+
+def cn_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    cn = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return cn / len(text)
+
+
+def weird_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    allowed = set("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ，。！？；：、“”‘’（）()《》<>-———…·%/\\ \n\r\t")
+    weird = sum(1 for ch in text if ch not in allowed and not ("\u4e00" <= ch <= "\u9fff"))
+    return weird / len(text)
+
+
+def has_keywords(text: str, keywords: Iterable[str]) -> bool:
+    return any(k in text for k in keywords)
+
+
+def coarse_filter_segment(
+    seg: Segment,
+    *,
+    min_cn_ratio: float = 0.3,
+    max_weird_ratio: float = 0.3,
+    require_keyword: bool = True,
+) -> tuple[bool, str]:
+    """
+    规则级粗过滤：先挡掉明显乱码/无关文本，减少 LLM 调用。
+    """
+    cn_r = cn_ratio(seg.text)
+    if cn_r < min_cn_ratio:
+        return False, f"cn_ratio<{min_cn_ratio:.2f}"
+    w_r = weird_ratio(seg.text)
+    if w_r > max_weird_ratio:
+        return False, f"weird_ratio>{max_weird_ratio:.2f}"
+    if require_keyword:
+        kws = KEYWORDS_CORE + (KEYWORDS_LAW if seg.source_type == "law_plan" else [])
+        if not has_keywords(seg.text, kws):
+            return False, "no_keyword"
+    return True, "ok"
 
 
 def detect_source_type(path: Path) -> str:
@@ -191,6 +244,36 @@ def judge_segment(seg: Segment, backend) -> dict:
         }
 
 
+def _get_score(decision: dict, key: str) -> int:
+    labels = decision.get("labels", {}) if isinstance(decision, dict) else {}
+    val = labels.get(key)
+    try:
+        return int(val)
+    except Exception:
+        return -1
+
+
+def keep_by_eval_rule(decision: dict) -> bool:
+    """
+    严格规则：relevance>=1 & kg_potential>=1 & cleanliness>=1 且 text_quality 非 garbled。
+    与旧版字段兼容。
+    """
+    labels = decision.get("labels", {}) if isinstance(decision, dict) else {}
+    domain = labels.get("is_water_disaster_domain")
+    text_quality = labels.get("text_quality")
+    if not domain:
+        return False
+    if text_quality == "garbled":
+        return False
+    relevance = _get_score(decision, "relevance_yangtze")
+    kg_potential = _get_score(decision, "kg_potential")
+    cleanliness = _get_score(decision, "cleanliness")
+    if relevance >= 1 and kg_potential >= 1 and cleanliness >= 1:
+        return True
+    # 兼容旧 keep_for_eval 字段
+    return bool(decision.get("keep_for_eval")) and text_quality in {"good", "noisy"}
+
+
 def filter_segments_with_llm(
     segments: List[Segment],
     llm_config: dict,
@@ -212,7 +295,7 @@ def filter_segments_with_llm(
             decision = judge_segment(seg, backend)
             updated_cache[seg.id] = decision
         seg.filter_decision = decision
-        if decision.get("keep_for_eval"):
+        if keep_by_eval_rule(decision):
             kept.append(seg)
 
     save_filter_cache(updated_cache, cache_path)
@@ -245,9 +328,18 @@ def collect_segments(root: Path, min_chars: int, max_chars: int) -> List[Segment
     return segments
 
 
+def _get_topic(seg: Segment) -> str:
+    if seg.filter_decision and isinstance(seg.filter_decision, dict):
+        labels = seg.filter_decision.get("labels", {})
+        topic = labels.get("topic_label") or labels.get("main_topic")
+        if topic:
+            return str(topic)
+    return "unknown"
+
+
 def sample_by_category(segments: List[Segment], target: Dict[str, int]) -> List[Segment]:
     """
-    按 source_type 分层随机采样（不足则全取）。
+    分层随机采样：先按 source_type，再尽量覆盖不同 topic_label。
     """
     by_cat: Dict[str, List[Segment]] = {}
     for seg in segments:
@@ -259,7 +351,31 @@ def sample_by_category(segments: List[Segment], target: Dict[str, int]) -> List[
         if not pool:
             continue
         random.shuffle(pool)
-        sampled.extend(pool[:num])
+        topic_buckets: Dict[str, List[Segment]] = {}
+        for s in pool:
+            topic_buckets.setdefault(_get_topic(s), []).append(s)
+        for lst in topic_buckets.values():
+            random.shuffle(lst)
+
+        picked: List[Segment] = []
+        topics = list(topic_buckets.keys())
+        # 轮询 topic，保证覆盖
+        while len(picked) < num and topics:
+            topics = [t for t in topics if topic_buckets.get(t)]
+            if not topics:
+                break
+            for t in list(topics):
+                if len(picked) >= num:
+                    break
+                if topic_buckets[t]:
+                    picked.append(topic_buckets[t].pop())
+        # 兜底：如仍不足，直接补齐
+        if len(picked) < num:
+            remaining = [s for lst in topic_buckets.values() for s in lst]
+            random.shuffle(remaining)
+            picked.extend(remaining[: max(0, num - len(picked))])
+
+        sampled.extend(picked)
     return sampled
 
 
@@ -302,31 +418,79 @@ def parse_target(target_args: List[str]) -> Dict[str, int]:
 
 def main():
     parser = argparse.ArgumentParser(description="构建 P5 Eval Pool，并按类别分层切分 Dev/Test")
-    parser.add_argument("--root", default="data/corpus_for_kg/handled_all_kg_corpus", help="源语料根目录")
-    parser.add_argument("--out-dir", default="data/p5_eval_pool", help="输出目录")
-    parser.add_argument("--min-chars", type=int, default=150, help="段落最小字符数，默认 150")
-    parser.add_argument("--max-chars", type=int, default=400, help="段落最大字符数，默认 400")
-    parser.add_argument("--target", nargs="+",
-                        default=["law_plan=60", "gazette_yearbook=80", "case_paper=100", "news_popular=60"],
-                        help="各类别抽取目标，如 law_plan=60 gazette_yearbook=80 ...")
-    parser.add_argument("--dev-ratio", type=float, default=0.6, help="Dev 比例，默认 0.6")
+    parser.add_argument("--cfg", default="configs/cfg.yaml", help="默认配置文件，命令行优先级更高")
+    parser.add_argument("--root", default=None, help="源语料根目录，默认读 cfg.paths.corpus_full")
+    parser.add_argument("--out-dir", default=None, help="输出目录，默认读 cfg.paths.eval_pool_dir")
+    parser.add_argument("--min-chars", type=int, default=None, help="段落最小字符数，默认 150 或 cfg.filtering.eval.min_chars")
+    parser.add_argument("--max-chars", type=int, default=None, help="段落最大字符数，默认 400 或 cfg.filtering.eval.max_chars")
+    parser.add_argument("--target", nargs="+", default=None,
+                        help="各类别抽取目标，如 law_plan=60 gazette_yearbook=80 ...，默认读 cfg.eval_pool.target")
+    parser.add_argument("--dev-ratio", type=float, default=None, help="Dev 比例，默认 0.6 或 cfg.eval_pool.dev_ratio")
     parser.add_argument("--no-filter", action="store_true", help="跳过 LLM 质量过滤，保留全部段落")
     parser.add_argument("--refilter", action="store_true", help="忽略缓存，强制重新调用 LLM 过滤")
     parser.add_argument("--filter-cache", default=None, help="LLM 过滤缓存文件路径，默认在 out-dir/_eval_filter_cache.jsonl")
-    parser.add_argument("--llm-provider", default=None, help="LLM provider（zhipu/openai/gemini），默认读取环境变量或 zhipu")
-    parser.add_argument("--llm-model", default=None, help="LLM 模型名，默认读取环境变量")
-    parser.add_argument("--llm-temperature", type=float, default=0.0, help="LLM 温度，默认 0.0（更稳定）")
+    parser.add_argument("--llm-provider", default=None, help="LLM provider（zhipu/openai/gemini），默认读取 cfg.llm.provider")
+    parser.add_argument("--llm-model", default=None, help="LLM 模型名，默认读取 cfg.llm.model_name")
+    parser.add_argument("--llm-temperature", type=float, default=None, help="LLM 温度，默认读取 cfg.llm.temperature 或 0.0")
+    parser.add_argument("--min-cn-ratio", type=float, default=None, help="汉字占比阈值，默认读 cfg.filtering.eval.min_cn_ratio")
+    parser.add_argument("--max-weird-ratio", type=float, default=None, help="异常字符比例阈值，默认读 cfg.filtering.eval.max_weird_ratio")
+    parser.add_argument("--no-keyword-filter", action="store_true", help="不强制关键词命中（默认启用关键词粗筛）")
     args = parser.parse_args()
 
-    root = Path(args.root)
-    out_dir = Path(args.out_dir)
+    cfg = {}
+    if args.cfg:
+        cfg_path = Path(args.cfg)
+        if cfg_path.exists():
+            try:
+                cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                cfg = {}
+
+    def pick(*vals, default=None):
+        for v in vals:
+            if v not in [None, ""]:
+                return v
+        return default
+
+    cfg_paths = cfg.get("paths", {}) if isinstance(cfg, dict) else {}
+    cfg_filter = cfg.get("filtering", {}).get("eval", {}) if isinstance(cfg, dict) else {}
+    cfg_evalpool = cfg.get("eval_pool", {}) if isinstance(cfg, dict) else {}
+    root = Path(pick(args.root, cfg_paths.get("corpus_full"), "data/corpus_for_kg/handled_all_kg_corpus"))
+    out_dir = Path(pick(args.out_dir, cfg_paths.get("eval_pool_dir"), "data/p5_eval_pool"))
     if not root.exists():
         raise FileNotFoundError(f"源目录不存在：{root}")
 
-    target = parse_target(args.target)
+    target_cfg = cfg_evalpool.get("target") or {}
+    if args.target:
+        target = parse_target(args.target)
+    elif target_cfg:
+        target = {k: int(v) for k, v in target_cfg.items()}
+    else:
+        target = {"law_plan": 60, "gazette_yearbook": 80, "case_paper": 100, "news_popular": 60}
     print(f"[EVAL] 扫描源目录: {root}")
-    segs = collect_segments(root, args.min_chars, args.max_chars)
+    min_chars = pick(args.min_chars, cfg_filter.get("min_chars"), 150)
+    max_chars = pick(args.max_chars, cfg_filter.get("max_chars"), 400)
+    segs = collect_segments(root, min_chars, max_chars)
     print(f"[EVAL] 收集段落 {len(segs)} 条")
+    # 粗过滤
+    min_cn = pick(args.min_cn_ratio, cfg_filter.get("min_cn_ratio"), 0.3)
+    max_weird = pick(args.max_weird_ratio, cfg_filter.get("max_weird_ratio"), 0.3)
+    use_kw = not args.no_keyword_filter if args.no_keyword_filter else cfg.get("filtering", {}).get("keyword_filter", True)
+    kept_coarse: List[Segment] = []
+    dropped = 0
+    for s in segs:
+        ok, reason = coarse_filter_segment(
+            s,
+            min_cn_ratio=min_cn,
+            max_weird_ratio=max_weird,
+            require_keyword=use_kw,
+        )
+        if ok:
+            kept_coarse.append(s)
+        else:
+            dropped += 1
+    segs = kept_coarse
+    print(f"[EVAL] 粗过滤后 {len(segs)} 条（丢弃 {dropped} 条明显无关/乱码）")
 
     # LLM 过滤
     if args.no_filter:
@@ -334,11 +498,11 @@ def main():
         print(f"[EVAL] 跳过 LLM 过滤，直接使用 {len(filtered)} 条")
     else:
         cache_path = Path(args.filter_cache) if args.filter_cache else out_dir / "_eval_filter_cache.jsonl"
-        llm_conf: dict = {"temperature": args.llm_temperature}
-        if args.llm_provider:
-            llm_conf["provider"] = args.llm_provider
-        if args.llm_model:
-            llm_conf["model_name"] = args.llm_model
+        llm_conf: dict = {"temperature": pick(args.llm_temperature, cfg.get("llm", {}).get("temperature"), 0.0)}
+        if args.llm_provider or cfg.get("llm", {}).get("provider"):
+            llm_conf["provider"] = pick(args.llm_provider, cfg.get("llm", {}).get("provider"))
+        if args.llm_model or cfg.get("llm", {}).get("model_name"):
+            llm_conf["model_name"] = pick(args.llm_model, cfg.get("llm", {}).get("model_name"))
         print(f"[EVAL] 使用 LLM 过滤段落，缓存: {cache_path}")
         try:
             filtered = filter_segments_with_llm(

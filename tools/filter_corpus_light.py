@@ -43,6 +43,7 @@ from tools.build_eval_pool import (  # noqa: E402
     load_filter_cache,
     save_filter_cache,
     Segment,
+    coarse_filter_segment,
 )
 
 
@@ -95,7 +96,12 @@ def keep_by_light_rule(decision: dict) -> bool:
     labels = decision.get("labels", {}) if isinstance(decision, dict) else {}
     domain = labels.get("is_water_disaster_domain")
     quality = labels.get("text_quality")
-    return bool(domain) and quality in {"good", "noisy"}
+    cleanliness = labels.get("cleanliness")
+    try:
+        cleanliness_score = int(cleanliness)
+    except Exception:
+        cleanliness_score = -1
+    return bool(domain) and quality != "garbled" and cleanliness_score != 0
 
 
 def filter_corpus(
@@ -278,10 +284,11 @@ def main():
         "--root", default="data/corpus_for_kg/handled_all_kg_corpus", help="源语料根目录")
     parser.add_argument(
         "--out", default="data/corpus_for_kg/p5_corpus_filtered/light_pool.jsonl", help="过滤后输出 jsonl 文件")
+    parser.add_argument("--cfg", default="configs/cfg.yaml", help="默认配置文件，命令行优先级更高")
     parser.add_argument("--min-chars", type=int,
-                        default=80, help="段落最小字符数，默认 80")
+                        default=None, help="段落最小字符数，默认读 cfg.filtering.light 或 80")
     parser.add_argument("--max-chars", type=int,
-                        default=600, help="段落最大字符数，默认 600")
+                        default=None, help="段落最大字符数，默认读 cfg.filtering.light 或 600")
     parser.add_argument("--max-files", type=int, default=None,
                         help="仅处理前 N 个 txt 文件，便于小规模测试")
     parser.add_argument("--filter-cache", default=None,
@@ -303,13 +310,36 @@ def main():
                         help="每次调用 LLM 后休眠秒数，用于手动控制 QPS")
     parser.add_argument("--flush-every", type=int, default=500,
                         help="每处理多少条刷新一次缓存/输出（<=1 表示每条都刷新）")
+    parser.add_argument("--min-cn-ratio", type=float, default=None, help="汉字占比阈值，默认读 cfg.filtering.light")
+    parser.add_argument("--max-weird-ratio", type=float, default=None, help="异常字符比例阈值，默认读 cfg.filtering.light")
+    parser.add_argument("--no-keyword-filter", action="store_true", help="不强制关键词命中（默认启用关键词粗筛）")
     args = parser.parse_args()
 
     root = Path(args.root)
     if not root.exists():
         raise FileNotFoundError(f"源目录不存在：{root}")
 
-    out_path = Path(args.out)
+    # 读取 cfg
+    cfg = {}
+    if args.cfg:
+        cfg_path = Path(args.cfg)
+        if cfg_path.exists():
+            try:
+                import yaml
+
+                cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                cfg = {}
+
+    def pick(*vals, default=None):
+        for v in vals:
+            if v not in [None, ""]:
+                return v
+        return default
+
+    cfg_paths = cfg.get("paths", {}) if isinstance(cfg, dict) else {}
+    cfg_filter = cfg.get("filtering", {}).get("light", {}) if isinstance(cfg, dict) else {}
+    out_path = Path(pick(args.out, cfg_paths.get("light_pool"), "data/corpus_for_kg/p5_corpus_filtered/light_pool.jsonl"))
     cache_path = (
         Path(args.filter_cache)
         if args.filter_cache
@@ -319,7 +349,9 @@ def main():
     llm_conf = resolve_llm_conf(args)
 
     print(f"[LIGHT] 扫描源目录: {root}")
-    segs = collect_segments(root, args.min_chars, args.max_chars)
+    min_chars = pick(args.min_chars, cfg_filter.get("min_chars"), 80)
+    max_chars = pick(args.max_chars, cfg_filter.get("max_chars"), 600)
+    segs = collect_segments(root, min_chars, max_chars)
     if args.max_files:
         # 仅保留来自前 N 个文件的段落，便于快速验证流程
         seen_files = set()
@@ -334,6 +366,25 @@ def main():
         print(f"[LIGHT] 收集段落 {len(segs)} 条（来源前 {len(seen_files)} 个文件）")
     else:
         print(f"[LIGHT] 收集段落 {len(segs)} 条")
+    # 粗过滤
+    min_cn = pick(args.min_cn_ratio, cfg_filter.get("min_cn_ratio"), 0.2)
+    max_weird = pick(args.max_weird_ratio, cfg_filter.get("max_weird_ratio"), 0.4)
+    use_kw = not args.no_keyword_filter if args.no_keyword_filter else cfg.get("filtering", {}).get("keyword_filter", True)
+    kept_coarse: List[Segment] = []
+    dropped = 0
+    for s in segs:
+        ok, reason = coarse_filter_segment(
+            s,
+            min_cn_ratio=min_cn,
+            max_weird_ratio=max_weird,
+            require_keyword=use_kw,
+        )
+        if ok:
+            kept_coarse.append(s)
+        else:
+            dropped += 1
+    segs = kept_coarse
+    print(f"[LIGHT] 粗过滤后 {len(segs)} 条（丢弃 {dropped} 条明显无关/乱码）")
 
     print(f"[LIGHT] 使用 LLM 过滤（缓存: {cache_path}）...")
     kept = filter_corpus(

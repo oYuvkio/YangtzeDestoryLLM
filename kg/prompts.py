@@ -382,6 +382,8 @@ TBox 定义（classes / relations / attributes）：
 
 任务说明：
 
+类使用提示：{class_usage_hint}
+
 1. 阅读下面的文本，识别其中的 0~N 个灾害事件（如某次洪水或干旱过程），并为每个事件构建一个结构化对象。
    - event_type 必须使用 TBox.classes.name 中已有的某个类名，例如 "FloodEvent", "DroughtEvent"。
    - 若无法确定具体子类，可以使用更上层的类，如 "DisasterEvent"。
@@ -552,14 +554,30 @@ EVAL_SEGMENT_FILTER_USER_TEMPLATE = """
    - news_popular：新闻报道、官方科普文章、媒体评论等；
    - other：无法判断或混合。
 
+【分维度打分】
+请为以下三个维度分别给出 0/1/2 的整数评分：
+relevance_yangtze：0=完全无关；1=泛水旱灾害相关；2=明确提到长江流域或可直接用于长江场景
+kg_potential：0=几乎没有可抽知识；1=有少量事实/措施；2=有清晰的事件、指标、因果或措施，适合抽取
+cleanliness：0=严重乱码；1=有少量噪声但可读；2=文本规范、句子完整
+
+【语义主题标签】
+为段落指定一个 topic_label（中文短语即可，可选集合示例）：
+- disaster_event（灾害事件叙述）
+- impact_assessment（影响与损失）
+- measure_response（防治措施/应急响应）
+- institution_regulation（制度/法规/流程）
+- background_analysis（致灾因子/气候背景/统计特征）
+- other（其他无法归类）
+
 【总体决策规则（keep_for_eval）】
 
 请根据以上标签，给出最终布尔值 keep_for_eval：
 
 - 只有在下面条件同时满足时，才给 keep_for_eval = true：
   1) is_water_disaster_domain = true；
-  2) text_quality = "good" 或 "noisy"（不能是 "garbled"）；
-  3) contains_event_or_rule = true；
+  2) text_quality = "good" 或 "noisy"（不能是 "garbled"）且 cleanliness >= 1；
+  3) contains_event_or_rule = true，且 kg_potential >= 1；
+  4) relevance_yangtze >= 1；
 
 - 在满足上述 3 个条件的前提下：
   - 如果 is_yangtze_related = true，通常应该保留；
@@ -582,6 +600,10 @@ JSON 模板如下（请替换成你的判断结果）：
     "is_water_disaster_domain": true,
     "text_quality": "good",
     "contains_event_or_rule": true,
+    "relevance_yangtze": 2,
+    "kg_potential": 2,
+    "cleanliness": 2,
+    "topic_label": "disaster_event",
     "main_topic": "……",
     "source_guess": "case_paper"
   }

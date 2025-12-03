@@ -11,6 +11,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from kg.utils.deduplication import EmbeddingDeduplicator
+from kg.utils.schema_alignment import SchemaAligner
 from .llm_core import LLMFactory, LLMBackend
 from .prompts import (
     P1_CQ_PROMPT,
@@ -20,6 +22,7 @@ from .prompts import (
     P5_EXTRACTION_PROMPT,
     EVENT_SCHEMA_HINT,
 )
+from kg.utils.entity_linking import EntityNormalizer, normalize_entity
 
 
 # =========================
@@ -231,9 +234,12 @@ class CQLLMPipeline:
             alias_map.setdefault(cls.name, cls.name)
 
         # ---- 合并类定义 ----
+        normalizer = EntityNormalizer()
         merged_classes: Dict[str, ClassDef] = {}
         for cls in schema.classes:
             canonical_name = alias_map.get(cls.name, cls.name)
+            # 简单标准化：地名别名等做归一
+            canonical_name = normalizer.normalize(canonical_name, "location") if canonical_name else canonical_name
 
             if canonical_name not in merged_classes:
                 merged_classes[canonical_name] = ClassDef(
@@ -271,6 +277,8 @@ class CQLLMPipeline:
 
             canonical_domain = alias_map.get(domain, domain)
             canonical_range = alias_map.get(range_, range_)
+            canonical_domain = normalizer.normalize(canonical_domain, "location") if canonical_domain else canonical_domain
+            canonical_range = normalizer.normalize(canonical_range, "location") if canonical_range else canonical_range
 
             if canonical_domain not in merged_classes or canonical_range not in merged_classes:
                 continue
@@ -291,6 +299,7 @@ class CQLLMPipeline:
         for attr in schema.attributes:
             owner = attr.owner
             canonical_owner = alias_map.get(owner, owner)
+            canonical_owner = normalizer.normalize(canonical_owner, "location") if canonical_owner else canonical_owner
             if canonical_owner not in merged_classes:
                 continue
             new_attributes.append(
@@ -333,68 +342,133 @@ class CQLLMPipeline:
         max_docs: Optional[int] = None,
         save_suggestions_path: Optional[Path] = None,
         save_aug_tbox_path: Optional[Path] = None,
+        *,
+        min_support: int = 2,
+        allow_new_classes: bool = False,
+        align_names: bool = False,
+        dedup_new: bool = False,
+        dedup_threshold: float = 0.8,
     ) -> TBoxSchema:
         """
-        在一个文献文件夹上迭代执行 P4：
-        - corpus_dir: 文献所在目录，每个文件视为一篇文献（建议事先切好段落/摘要）；
-        - pattern: 文件通配符，如 '*.txt'；
-        - max_docs: 若不为 None，则只处理前 max_docs 个文件，用于快速实验。
-
-        返回：增强后的 TBoxSchema。
+        在一个文献文件夹上执行“两阶段”P4：
+        1) 仅收集所有文献的 suggestions，并统计 _support（出现次数）；
+        2) 按支持度/是否允许新增类过滤一次性合入 TBox。
         """
         corpus_path = Path(corpus_dir)
         all_files = sorted(corpus_path.glob(pattern))
         if max_docs is not None:
             all_files = all_files[:max_docs]
 
-        current_schema = base_schema
-        all_suggestions: List[Dict[str, Any]] = []
-
+        collected: List[Dict[str, Any]] = []
         for idx, fp in enumerate(all_files, start=1):
             try:
                 text = fp.read_text(encoding="utf-8")
             except Exception:
                 print(f"[WARN] 读取文件失败，跳过: {fp}")
                 continue
-
             if not text.strip():
                 print(f"[INFO] 空文件，跳过: {fp}")
                 continue
-
-            print(f"[P4] 处理文献 {idx}/{len(all_files)}: {fp.name}")
-
-            # 对当前 schema + 单篇文献做 P4
-            p4_result = self.enhance_schema(current_schema, text)
-            suggestions = p4_result.get("suggestions", []) or []
-            if not suggestions:
+            print(f"[P4] 收集文献 {idx}/{len(all_files)}: {fp.name}")
+            try:
+                res = self.enhance_schema(base_schema, text)
+                sug = res.get("suggestions", []) or []
+                for s in sug:
+                    s["_source"] = fp.name
+                collected.extend(sug)
+            except Exception as e:
+                print(f"[P4][ERROR] {fp.name}: {e}")
                 continue
 
-            all_suggestions.extend(suggestions)
+        # 聚合 _support
+        buckets: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
+        for s in collected:
+            s_type = s.get("type")
+            name = s.get("name")
+            if not s_type or not name:
+                continue
+            parent_or_owner = s.get("parent_or_domain_range_or_owner") or s.get(
+                "owner") or s.get("domain") or ""
+            range_ = s.get("range") or ""
+            key = (s_type, name, parent_or_owner, range_)
+            if key not in buckets:
+                s["_support"] = 1
+                buckets[key] = s
+            else:
+                buckets[key]["_support"] += 1
+        aggregated = list(buckets.values())
 
-            # 把本篇文献的补充合入当前 schema（迭代进化）
-            current_schema = apply_p4_suggestions(current_schema, p4_result)
-
-        # 统一保存 suggestions 和增强后的 TBox
         if save_suggestions_path:
             save_suggestions_path.parent.mkdir(parents=True, exist_ok=True)
             with save_suggestions_path.open("w", encoding="utf-8") as f:
-                json.dump({"suggestions": all_suggestions},
+                json.dump({"suggestions": aggregated},
                           f, ensure_ascii=False, indent=2)
 
-        if save_aug_tbox_path:
-            self._dump_json(current_schema.to_dict(), save_aug_tbox_path)
+        # 名称对齐（同义归一）
+        if align_names:
+            aligner = SchemaAligner()
+            for s in aggregated:
+                if s.get("type") == "class":
+                    s["name"] = aligner.align_class_name(s.get("name", ""))
+                elif s.get("type") == "relation":
+                    s["name"] = aligner.align_relation_name(s.get("name", ""))
+                # 仅归一 name；domain/range/owner 不做强映射，避免误对齐
 
-        return current_schema
+        # 过滤再合并
+        filtered: List[Dict[str, Any]] = []
+        for s in aggregated:
+            sup = int(s.get("_support", 1))
+            if sup < min_support:
+                continue
+            if s.get("type") == "class" and not allow_new_classes:
+                continue
+            filtered.append(s)
+
+        # 去重：对新增类/关系做向量相似过滤，减少模式膨胀
+        if dedup_new and filtered:
+            dedup = EmbeddingDeduplicator(threshold=dedup_threshold)
+            base_dict = base_schema.to_dict()
+            existing_classes = base_dict.get("classes", [])
+            existing_rels = base_dict.get("relations", [])
+            cand_classes = [s for s in filtered if s.get("type") == "class"]
+            cand_rels = [s for s in filtered if s.get("type") == "relation"]
+            class_res = dedup.deduplicate_classes(existing_classes, cand_classes)
+            rel_res = dedup.deduplicate_relations(existing_rels, cand_rels)
+            print(f"[P4] 去重后保留类 {len(class_res.accepted)} / {len(cand_classes)}，关系 {len(rel_res.accepted)} / {len(cand_rels)}")
+            filtered = class_res.accepted + rel_res.accepted + [s for s in filtered if s.get("type") == "attribute"]
+
+        if not filtered:
+            if save_aug_tbox_path:
+                self._dump_json(base_schema.to_dict(), save_aug_tbox_path)
+            return base_schema
+
+        merged = apply_p4_suggestions(base_schema, {"suggestions": filtered})
+        if save_aug_tbox_path:
+            self._dump_json(merged.to_dict(), save_aug_tbox_path)
+        return merged
 
     # ---------- P5 ----------
-    def extract_events(self, paragraph: str, schema: TBoxSchema, save_path: Optional[Path] = None) -> Dict[str, Any]:
-        """在 TBox 约束下抽取事件与三元组。"""
-        schema_json = json.dumps(
-            schema.to_dict(), ensure_ascii=False, indent=2)
+    def extract_events(
+        self,
+        paragraph: str,
+        schema: TBoxSchema,
+        save_path: Optional[Path] = None,
+        favor_existing_classes: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        在 TBox 约束下抽取事件与三元组。
+        favor_existing_classes=True 时，提示尽量复用已有类；False 时鼓励使用新增细粒度类。
+        """
+        schema_json = json.dumps(schema.to_dict(), ensure_ascii=False, indent=2)
+        if favor_existing_classes:
+            class_usage_hint = "优先使用 TBox 中已有的类名，不要随意创造新的事件类型；倾向用已有类 + 属性表达。"
+        else:
+            class_usage_hint = "允许充分使用 TBox 中新增的细粒度类（如新补充的 HazardFactor 子类等），鼓励细分事件类型。"
         user_prompt = P5_EXTRACTION_PROMPT.format(
             schema_json=schema_json,
             event_schema=EVENT_SCHEMA_HINT,
             paragraph=paragraph.strip(),
+            class_usage_hint=class_usage_hint,
         )
         res = self.client.call("仅输出 JSON，不要解释。", user_prompt)
         if save_path:
@@ -436,6 +510,25 @@ class CQLLMPipeline:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as f:
             json.dump(obj, f, ensure_ascii=False, indent=2)
+
+    # ---------- 去重辅助 ----------
+    @staticmethod
+    def deduplicate_tbox(
+        schema: TBoxSchema, *, threshold: float = 0.75
+    ) -> TBoxSchema:
+        """
+        使用 embedding 相似度对类/关系去重，减少模式碎片。
+        默认仅用于 P2/P3 后的去重，可根据需要调用。
+        """
+        dedup = EmbeddingDeduplicator(threshold=threshold)
+        base_dict = schema.to_dict()
+        class_res = dedup.deduplicate_classes([], base_dict.get("classes", []))
+        rel_res = dedup.deduplicate_relations([], base_dict.get("relations", []))
+        return TBoxSchema(
+            classes=[ClassDef(**c) for c in class_res.accepted],
+            relations=[RelationDef(**r) for r in rel_res.accepted],
+            attributes=schema.attributes,
+        )
 
 
 # =========================

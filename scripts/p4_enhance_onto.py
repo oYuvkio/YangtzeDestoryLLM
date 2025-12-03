@@ -4,6 +4,7 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict
+import yaml
 from kg.cq_pipeline import (
     CQLLMPipeline,
     TBoxSchema,
@@ -11,6 +12,8 @@ from kg.cq_pipeline import (
     RelationDef,
     AttributeDef,
 )
+from kg.utils.schema_alignment import SchemaAligner
+from kg.utils.deduplication import EmbeddingDeduplicator
 
 
 def build_tbox(path: Path) -> TBoxSchema:
@@ -42,6 +45,9 @@ def merge_suggestions(
     *,
     allow_new_classes: bool = False,
     min_support: int = 2,
+    align_names: bool = False,
+    dedup_new: bool = False,
+    dedup_threshold: float = 0.8,
 ) -> TBoxSchema:
     """
     根据聚合建议生成增强 TBox（兼容旧版 apply_p4_suggestions 的需求）。
@@ -51,6 +57,15 @@ def merge_suggestions(
     - 关系必须有 domain/range 且存在于类集合；
     - 属性必须挂在现有 owner 上。
     """
+    # 名称对齐
+    if align_names:
+        aligner = SchemaAligner()
+        for s in suggestions:
+            if s.get("type") == "class":
+                s["name"] = aligner.align_class_name(s.get("name", ""))
+            elif s.get("type") == "relation":
+                s["name"] = aligner.align_relation_name(s.get("name", ""))
+
     class_names = {c.name for c in base.classes}
     rel_keys = {(r.name, r.domain, r.range) for r in base.relations}
     attr_keys = {(a.owner, a.name) for a in base.attributes}
@@ -58,6 +73,16 @@ def merge_suggestions(
     new_classes = list(base.classes)
     new_relations = list(base.relations)
     new_attrs = list(base.attributes)
+
+    # 可选：对 class/relation 做 embedding 去重，减少重复
+    if dedup_new:
+        dedup = EmbeddingDeduplicator(threshold=dedup_threshold)
+        base_dict = base.to_dict()
+        cand_classes = [s for s in suggestions if s.get("type") == "class"]
+        cand_rels = [s for s in suggestions if s.get("type") == "relation"]
+        class_res = dedup.deduplicate_classes(base_dict.get("classes", []), cand_classes)
+        rel_res = dedup.deduplicate_relations(base_dict.get("relations", []), cand_rels)
+        suggestions = class_res.accepted + rel_res.accepted + [s for s in suggestions if s.get("type") == "attribute"]
 
     for s in suggestions:
         s_type = s.get("type")
@@ -116,37 +141,62 @@ def main():
     - final_dir  ：存放最终/基线 TBox（带时间戳备份）
     """
     parser = argparse.ArgumentParser(description="P4 文献增强 TBox 批处理")
-    parser.add_argument("--base-tbox", default="outputs/cq_pipeline/final/p3_tbox_normalized.json",
-                        help="基线 TBox 路径（默认 final/p3_tbox_normalized.json）")
-    parser.add_argument("--corpus-dir", default="data/enhancing_onto_corpus_docs",
-                        help="增强语料目录（默认 data/enhancing_onto_corpus_docs）")
-    parser.add_argument("--process-dir", default="outputs/cq_pipeline/process",
-                        help="中间结果输出目录（默认 outputs/cq_pipeline/process）")
-    parser.add_argument("--final-dir", default="outputs/cq_pipeline/final",
-                        help="最终 TBox 输出目录（默认 outputs/cq_pipeline/final）")
-    parser.add_argument("--min-support", type=int, default=2,
-                        help="建议合并的最小支持度，默认 2")
+    parser.add_argument("--cfg", default="configs/cfg.yaml", help="默认配置文件，命令行优先级更高")
+    parser.add_argument("--base-tbox", default=None,
+                        help="基线 TBox 路径（默认 cfg.paths.output_dir/p3_tbox_normalized.json）")
+    parser.add_argument("--corpus-dir", default=None,
+                        help="增强语料目录（默认 cfg.paths.p4_corpus_dir）")
+    parser.add_argument("--process-dir", default=None,
+                        help="中间结果输出目录（默认 cfg.paths.p4_process_dir）")
+    parser.add_argument("--final-dir", default=None,
+                        help="最终 TBox 输出目录（默认 cfg.paths.p4_final_dir）")
+    parser.add_argument("--min-support", type=int, default=None,
+                        help="建议合并的最小支持度，默认读 cfg.p4.min_support 或 2")
     parser.add_argument("--overwrite", action="store_true",
                         help="覆盖已存在的 per-file 建议（默认跳过已完成文件）")
     parser.add_argument("--rerun-empty", action="store_true",
                         help="对已存在但建议为空或包含 error 的文件重跑（不全量覆盖）")
     parser.add_argument("--allow-new-classes", action="store_true",
-                        help="合并阶段是否允许新增类（默认不允许）")
+                        help="合并阶段是否允许新增类（默认读 cfg.p4.allow_new_classes）")
     parser.add_argument("--extra-supports", default="",
                         help="额外的 min_support 列表，用逗号分隔，如 1,3")
     parser.add_argument("--agg-file", default=None,
                         help="直接指定聚合建议文件（默认 process_dir/p4_corpus_suggestions_agg.json）")
     parser.add_argument("--merge-only", action="store_true",
                         help="仅基于已有聚合文件做合并，不重新调用 LLM 生成建议")
+    parser.add_argument("--align-names", action="store_true",
+                        help="合并前对建议做同义归一（SchemaAligner），默认读 cfg.p4.align_synonyms")
+    parser.add_argument("--dedup-new", action="store_true",
+                        help="对新增类/关系做 embedding 去重，减少重复（阈值见 --dedup-threshold），默认读 cfg.p4.dedup_with_embeddings")
+    parser.add_argument("--dedup-threshold", type=float, default=None,
+                        help="去重相似度阈值，默认读 cfg.p4.dedup_threshold 或 0.8")
     args = parser.parse_args()
 
+    cfg = {}
+    if args.cfg:
+        cfg_path = Path(args.cfg)
+        if cfg_path.exists():
+            try:
+                cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            except Exception:
+                cfg = {}
+
+    def pick(*vals, default=None):
+        for v in vals:
+            if v not in [None, ""]:
+                return v
+        return default
+
+    cfg_paths = cfg.get("paths", {}) if isinstance(cfg, dict) else {}
+    cfg_p4 = cfg.get("p4", {}) if isinstance(cfg, dict) else {}
+
     version_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    final_dir = Path(args.final_dir)
-    process_dir = Path(args.process_dir)
+    final_dir = Path(pick(args.final_dir, cfg_paths.get("p4_final_dir"), "outputs/cq_pipeline/final"))
+    process_dir = Path(pick(args.process_dir, cfg_paths.get("p4_process_dir"), "outputs/cq_pipeline/process"))
     final_dir.mkdir(parents=True, exist_ok=True)
     process_dir.mkdir(parents=True, exist_ok=True)
 
-    base_path = Path(args.base_tbox)
+    base_path = Path(pick(args.base_tbox, cfg_paths.get("output_dir"), "outputs/cq_pipeline/final") + "/p3_tbox_normalized.json") if args.base_tbox is None else Path(args.base_tbox)
     if not base_path.exists():
         print(f"未找到基线 TBox：{base_path}，请先完成 P1-P3。")
         return
@@ -157,8 +207,7 @@ def main():
         cfg_llm = pipeline.llm_config
     print(f"[LLM][P4] provider={cfg_llm.get('provider')}, model={cfg_llm.get('model_name')}, temperature={cfg_llm.get('temperature')}")
     corpus_dir = Path(args.corpus_dir)
-    agg_path = Path(args.agg_file) if args.agg_file else process_dir / \
-        "p4_corpus_suggestions_agg.json"
+    agg_path = Path(args.agg_file) if args.agg_file else process_dir / "p4_corpus_suggestions_agg.json"
 
     aggregated: List[Dict] = []
     processed, skipped_existing, failed = [], [], []
@@ -276,7 +325,8 @@ def main():
         print(f"[P4] 聚合建议已写入：{agg_path}，总计 {len(aggregated)} 条")
 
     # 使用多组配置生成增强 TBox
-    supports = {args.min_support}
+    min_support_cfg = cfg_p4.get("min_support", 2)
+    supports = {pick(args.min_support, min_support_cfg, 2)}
     if args.extra_supports:
         for s in args.extra_supports.split(","):
             s = s.strip()
@@ -290,17 +340,27 @@ def main():
         if not args.allow_new_classes:
             configs.append((sup, True, f"s{sup}_allow1"))
 
+    # 默认为 cfg 或参数的 allow_new_classes
+    allow_new_default = pick(args.allow_new_classes, cfg_p4.get("allow_new_classes"), False)
+    align_names = bool(pick(args.align_names, cfg_p4.get("align_synonyms"), False))
+    dedup_new = bool(pick(args.dedup_new, cfg_p4.get("dedup_with_embeddings"), False))
+    dedup_threshold = float(pick(args.dedup_threshold, cfg_p4.get("dedup_threshold"), 0.8))
+
     for sup, allow_cls, suffix in configs:
+        allow_flag = allow_cls if args.allow_new_classes else allow_new_default if allow_cls else allow_cls
         tbox_aug = merge_suggestions(
             base,
             aggregated,
-            allow_new_classes=allow_cls,
+            allow_new_classes=allow_flag,
             min_support=sup,
+            align_names=align_names,
+            dedup_new=dedup_new,
+            dedup_threshold=dedup_threshold,
         )
         out_path = final_dir / f"p4_tbox_augmented_{suffix}.json"
         write_json_with_backup(out_path, tbox_aug.to_dict(), version_tag)
         print(
-            f"[P4] 已生成增强 TBox (allow_new_classes={allow_cls}, min_support={sup}) -> {out_path.name}")
+            f"[P4] 已生成增强 TBox (allow_new_classes={allow_flag}, min_support={sup}) -> {out_path.name}")
     # 保存进度
     seen_src = set(processed_src) | set(skipped_src) | {p for p, _e in failed}
     not_processed = [str(f) for f in files if str(f) not in seen_src]
