@@ -260,13 +260,15 @@ class Constants:
     DEFAULT_MIN_CHARS: Final[int] = 800
     DEFAULT_MAX_CHARS: Final[int] = 2500
     MIN_VALID_TEXT_LENGTH: Final[int] = 100
-    MAX_LLM_INPUT_CHARS: Final[int] = 8000
+    MAX_LLM_INPUT_CHARS: Final[int] = 8000  # 单次 LLM 调用的最大输入字符数
+    LLM_CHUNK_SIZE: Final[int] = 6000  # 分块大小（比 MAX 小一些，留给 prompt 空间）
+    LLM_CHUNK_OVERLAP: Final[int] = 300  # 分块重叠字符数，保持语义连续性
 
     # 并行处理
     DEFAULT_MAX_WORKERS: Final[int] = 4
 
     # 缓存
-    DEFAULT_CACHE_SAVE_INTERVAL: Final[int] = 100
+    DEFAULT_CACHE_SAVE_INTERVAL: Final[int] = 10  # 每处理 10 个文件自动保存
     CACHE_FILE_NAME: Final[str] = ".corpus_cleaner_cache.jsonl"
 
     # 重试机制
@@ -2845,7 +2847,7 @@ class LLMSemanticSplitter:
         backend = self.llm_backend
         return backend is not None
 
-    @retry_on_network_error(max_retries=3, initial_delay=2.0)
+    @retry_on_network_error(max_retries=3, initial_delay=5.0)
     def split(self, text: str) -> List[str]:
         """
         使用 LLM 进行语义切分。
@@ -2857,28 +2859,16 @@ class LLMSemanticSplitter:
             切分后保留的子段落列表
         
         注意：
+        - 过长文本会自动分块处理，确保所有内容都经过 LLM
         - 429 错误直接抛出，不重试
         - 网络超时会自动重试
-        - 其他错误会回退到规则切分
         """
         # 文本过短，直接返回
         if not text or len(text.strip()) < self.min_chars:
             logger.debug(f"文本过短({len(text.strip())} 字符)，跳过 LLM 切分")
             return [text.strip()] if text and text.strip() else []
 
-        # 在调用 LLM 之前打印信息（确保即使失败也能看到）
-        if self.show_llm_output:
-            print(f"\n{'='*60}")
-            print(f"🤖 LLM 调用信息")
-            print(f"{'='*60}")
-            print(f"  • 厂商: {self.config.provider}")
-            print(f"  • 模型: {self.config.model_name}")
-            print(f"  • 温度: {self.config.temperature}")
-            print(f"  • 输入长度: {len(text)} 字符")
-            print(f"{'='*60}")
-            print(f"🔄 正在调用 LLM...")
-
-        # 检查 LLM 是否可用 - 如果启用了 LLM 切分但后端不可用，直接抛出异常
+        # 检查 LLM 是否可用
         if self.llm_backend is None:
             error_msg = (
                 f"LLM 后端不可用，无法进行语义切分 "
@@ -2888,6 +2878,167 @@ class LLMSemanticSplitter:
                 print(f"❌ {error_msg}")
             logger.error(error_msg)
             raise RuntimeError(error_msg)
+
+        # 检查是否需要分块处理
+        max_input = Constants.LLM_CHUNK_SIZE
+        if len(text) > max_input:
+            return self._split_long_text(text)
+        
+        # 正常处理单块文本
+        return self._process_single_chunk(text, chunk_index=0, total_chunks=1)
+
+    def _split_into_chunks(self, text: str) -> List[str]:
+        """
+        将长文本分成多个块，带有重叠以保持语义连续性。
+        
+        Args:
+            text: 待分块的文本
+            
+        Returns:
+            分块后的文本列表
+        """
+        chunk_size = Constants.LLM_CHUNK_SIZE
+        overlap = Constants.LLM_CHUNK_OVERLAP
+        
+        if len(text) <= chunk_size:
+            return [text]
+        
+        chunks = []
+        start = 0
+        
+        while start < len(text):
+            end = min(start + chunk_size, len(text))
+            chunk = text[start:end]
+            
+            # 尝试在自然边界处切分（句号、换行符等）
+            if end < len(text):
+                # 向前查找最近的自然切分点
+                for boundary in ['\n\n', '\n', '。', '！', '？', '。', '. ', '! ', '? ']:
+                    last_boundary = chunk.rfind(boundary)
+                    if last_boundary > chunk_size * 0.7:  # 至少保留 70% 内容
+                        chunk = chunk[:last_boundary + len(boundary)]
+                        end = start + len(chunk)
+                        break
+            
+            chunks.append(chunk.strip())
+            
+            # 下一块从重叠位置开始
+            start = end - overlap
+            if start >= len(text):
+                break
+            # 避免最后一块太短
+            if len(text) - start < self.min_chars:
+                break
+        
+        return [c for c in chunks if c]  # 过滤空块
+
+    def _split_long_text(self, text: str) -> List[str]:
+        """
+        分块处理长文本，确保所有内容都经过 LLM。
+        
+        Args:
+            text: 过长的文本
+            
+        Returns:
+            所有块处理后合并的结果
+        """
+        chunks = self._split_into_chunks(text)
+        total_chunks = len(chunks)
+        
+        if self.show_llm_output:
+            print(f"\n📄 文本过长 ({len(text)} 字符)，分成 {total_chunks} 块处理")
+        logger.info(f"文本过长 ({len(text)} 字符)，分成 {total_chunks} 块处理")
+        
+        all_segments: List[str] = []
+        
+        for i, chunk in enumerate(chunks):
+            if self.show_llm_output:
+                print(f"\n🔄 处理第 {i+1}/{total_chunks} 块 ({len(chunk)} 字符)")
+            logger.info(f"处理第 {i+1}/{total_chunks} 块 ({len(chunk)} 字符)")
+            
+            try:
+                segments = self._process_single_chunk(chunk, chunk_index=i, total_chunks=total_chunks)
+                all_segments.extend(segments)
+            except (_InternalRateLimitError, _InternalAccountBlockedError):
+                # 严重错误直接向上抛出
+                raise
+            except Exception as e:
+                logger.warning(f"第 {i+1} 块处理失败: {e}")
+                # 其他错误继续处理下一块
+                continue
+        
+        # 去重（因为分块有重叠，可能有重复结果）
+        unique_segments = self._deduplicate_segments(all_segments)
+        
+        if self.show_llm_output:
+            print(f"\n✅ 分块处理完成: 共 {len(unique_segments)} 个有效段落")
+        logger.info(f"分块处理完成: {total_chunks} 块 -> {len(unique_segments)} 个有效段落")
+        
+        return unique_segments
+
+    def _deduplicate_segments(self, segments: List[str]) -> List[str]:
+        """
+        去除重复的段落（基于内容相似度）。
+        
+        Args:
+            segments: 待去重的段落列表
+            
+        Returns:
+            去重后的段落列表
+        """
+        if not segments:
+            return []
+        
+        unique = []
+        seen_texts = set()
+        
+        for seg in segments:
+            # 简化文本用于比较（去除空白）
+            normalized = ''.join(seg.split())
+            
+            # 检查是否为已有段落的子串或超串
+            is_duplicate = False
+            for seen in seen_texts:
+                # 如果当前文本包含在已有文本中，或者非常相似
+                if normalized in seen or seen in normalized:
+                    is_duplicate = True
+                    break
+                # 简单的相似度检查：前100字符相同
+                if len(normalized) > 100 and len(seen) > 100:
+                    if normalized[:100] == seen[:100]:
+                        is_duplicate = True
+                        break
+            
+            if not is_duplicate:
+                unique.append(seg)
+                seen_texts.add(normalized)
+        
+        return unique
+
+    def _process_single_chunk(self, text: str, chunk_index: int = 0, total_chunks: int = 1) -> List[str]:
+        """
+        处理单个文本块。
+        
+        Args:
+            text: 待处理的文本块
+            chunk_index: 当前块索引
+            total_chunks: 总块数
+            
+        Returns:
+            处理后的段落列表
+        """
+        # 在调用 LLM 之前打印信息
+        if self.show_llm_output:
+            chunk_info = f" [块 {chunk_index+1}/{total_chunks}]" if total_chunks > 1 else ""
+            print(f"\n{'='*60}")
+            print(f"🤖 LLM 调用信息{chunk_info}")
+            print(f"{'='*60}")
+            print(f"  • 厂商: {self.config.provider}")
+            print(f"  • 模型: {self.config.model_name}")
+            print(f"  • 温度: {self.config.temperature}")
+            print(f"  • 输入长度: {len(text)} 字符")
+            print(f"{'='*60}")
+            print(f"🔄 正在调用 LLM...")
         
         # LLM 后端初始化成功，打印 API Key 信息
         if self.show_llm_output:
@@ -2945,9 +3096,11 @@ class LLMSemanticSplitter:
                 logger.info(f"✅ LLM 切分成功: {len(segments)} 个段落，原文长度 {len(text)} 字符")
                 return segments
 
-            logger.warning(f"⚠️ LLM 返回空结果，回退到规则切分 (text_len={len(text)})")
+            logger.warning(f"⚠️ LLM 返回空结果 (text_len={len(text)})")
             if self.show_llm_output:
-                print(f"⚠️ LLM 返回空结果，回退到规则切分")
+                print(f"⚠️ LLM 返回空结果")
+            # 返回空列表，不回退到规则切分
+            return []
 
         except Exception as e:
             # 打印错误信息
@@ -2969,23 +3122,21 @@ class LLMSemanticSplitter:
             if isinstance(e, (OSError, IOError)):
                 raise
 
-            # 解析/其他异常：回退到规则切分
-            logger.info(f"⚠️ LLM 语义切分失败，回退到规则切分: {e}")
-            logger.info(f"⚠️ 回退到规则切分 (text_len={len(text)})")
-            return self.fallback_splitter.split(text)
+            # 解析/其他异常：记录日志并抛出
+            logger.error(f"❌ LLM 语义切分失败: {e}")
+            raise RuntimeError(f"LLM 语义切分失败: {e}") from e
 
-        # 正常回退到规则切分
-        logger.info(f"⚠️ 回退到规则切分 (text_len={len(text)})")
-        return self.fallback_splitter.split(text)
+        # 返回空列表（不回退到规则切分）
+        return []
 
     def _build_user_prompt(self, text: str) -> str:
         """构建 LLM 用户提示词"""
-        # 截断过长文本，避免超出 token 限制
+        # 此时文本应该已经在上层分块处理过，不应超过最大限制
+        # 作为安全保障，仍然检查并截断
         max_input = Constants.MAX_LLM_INPUT_CHARS
-        truncated_text = text[:max_input]
-        truncated_notice = ""
         if len(text) > max_input:
-            truncated_notice = "\n[注意：文本已截断，请只处理以上内容]"
+            logger.warning(f"文本单块仍超过最大限制 ({len(text)} > {max_input})，将被截断")
+            text = text[:max_input]
 
         return f"""请对以下文本进行语义切分和筛选。
 【切分要求】
@@ -3012,8 +3163,8 @@ class LLMSemanticSplitter:
 }}
 【待处理文本】
 
-{truncated_text}
----{truncated_notice}"""
+{text}
+---"""
 
     def _parse_response(self, response: str) -> List[str]:
         """
@@ -4269,6 +4420,45 @@ def print_banner(
     print(banner)
 
 
+def _resolve_log_file_path(log_path_str: str) -> Path:
+    """
+    解析日志文件路径，确保多次运行能追加到同一个文件。
+    
+    支持的输入格式：
+    - 完整文件路径: ./logs/app.log -> 直接使用
+    - 无后缀路径: ./logs/app -> 自动添加 .log 后缀
+    - 目录路径: ./logs/ -> 在目录下创建 corpus_cleaner.log
+    
+    Args:
+        log_path_str: 用户输入的日志路径字符串
+        
+    Returns:
+        解析后的日志文件 Path 对象
+    """
+    log_path = Path(log_path_str)
+    
+    # 情况 1: 已存在的目录
+    if log_path.exists() and log_path.is_dir():
+        log_file = log_path / "corpus_cleaner.log"
+        return log_file
+    
+    # 情况 2: 路径以 / 或 \\ 结尾，明确是目录
+    if log_path_str.endswith('/') or log_path_str.endswith('\\'):
+        log_path.mkdir(parents=True, exist_ok=True)
+        log_file = log_path / "corpus_cleaner.log"
+        return log_file
+    
+    # 情况 3: 没有文件后缀，当作文件名处理，自动添加 .log
+    if not log_path.suffix:
+        log_file = log_path.with_suffix('.log')
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        return log_file
+    
+    # 情况 4: 有后缀名，直接使用
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    return log_path
+
+
 def run_cli() -> int:
     """
     运行命令行接口。
@@ -4283,22 +4473,10 @@ def run_cli() -> int:
     log_level = logging.DEBUG if args.verbose else logging.INFO
     log_file: Optional[Path] = None
     if args.log_file:
-        log_file = Path(args.log_file)
-        # 处理日志文件路径
-        if log_file.exists() and log_file.is_dir():
-            # 路径是已存在的目录，自动生成文件名
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_file = log_file / f"corpus_cleaner_{timestamp}.log"
-        elif not log_file.suffix:
-            # 没有后缀名，当作目录处理
-            from datetime import datetime
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            log_file.mkdir(parents=True, exist_ok=True)
-            log_file = log_file / f"corpus_cleaner_{timestamp}.log"
-        # 确保父目录存在
-        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_file = _resolve_log_file_path(args.log_file)
     
+    # 重置日志器（确保每次运行都使用正确的配置）
+    LoggerFactory.reset()
     global logger
     logger = LoggerFactory.get_logger(level=log_level, log_file=log_file)
     
