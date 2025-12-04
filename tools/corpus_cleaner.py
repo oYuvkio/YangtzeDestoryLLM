@@ -96,6 +96,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed, Future
 from dataclasses import dataclass, field, asdict
 from enum import Enum, auto
 from functools import lru_cache, wraps
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import (
     Any,
@@ -148,8 +149,28 @@ if str(PROJECT_ROOT) not in sys.path:
 # ==============================================================================
 # 使用延迟导入模式：模块级变量初始化为 None，在实际使用时才导入
 _LLMFactory: Optional[type] = None
-_RateLimitError: Type[Exception] = Exception
-_AccountBlockedError: Type[Exception] = Exception
+
+
+# 定义内部 LLM 错误类（确保不会被其他异常意外匹配）
+class _InternalRateLimitError(Exception):
+    """
+    内部限流错误标记。
+    用于明确标识 LLM API 返回的 429 错误，不会被其他异常误匹配。
+    """
+    pass
+
+
+class _InternalAccountBlockedError(Exception):
+    """
+    内部账号封禁错误标记。
+    用于明确标识 LLM API 返回的 401 错误，不会被其他异常误匹配。
+    """
+    pass
+
+
+# 外部 LLM 模块的异常类引用（延迟导入后赋值）
+_ExternalRateLimitError: Optional[Type[Exception]] = None
+_ExternalAccountBlockedError: Optional[Type[Exception]] = None
 
 
 def _ensure_llm_imports() -> None:
@@ -161,7 +182,7 @@ def _ensure_llm_imports() -> None:
     2. 加快脚本启动速度（只有实际使用 LLM 功能时才导入）
     3. 在 LLM 模块不可用时仍能运行基础功能
     """
-    global _LLMFactory, _RateLimitError, _AccountBlockedError
+    global _LLMFactory, _ExternalRateLimitError, _ExternalAccountBlockedError
 
     if _LLMFactory is not None:
         return  # 已经导入过
@@ -169,12 +190,41 @@ def _ensure_llm_imports() -> None:
     try:
         from kg.llm_core import LLMFactory, RateLimitError, AccountBlockedError
         _LLMFactory = LLMFactory
-        _RateLimitError = RateLimitError
-        _AccountBlockedError = AccountBlockedError
+        _ExternalRateLimitError = RateLimitError
+        _ExternalAccountBlockedError = AccountBlockedError
     except ImportError as e:
         logging.getLogger(__name__).warning(
             f"无法导入 LLM 模块，LLM 相关功能将不可用: {e}"
         )
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """
+    判断是否为限流错误 (429)。
+    支持内部异常和外部 LLM 模块异常。
+    """
+    if isinstance(exc, _InternalRateLimitError):
+        return True
+    if _ExternalRateLimitError is not None and isinstance(exc, _ExternalRateLimitError):
+        return True
+    return False
+
+
+def _is_account_blocked_error(exc: Exception) -> bool:
+    """
+    判断是否为账号封禁错误 (401)。
+    支持内部异常和外部 LLM 模块异常。
+    """
+    if isinstance(exc, _InternalAccountBlockedError):
+        return True
+    if _ExternalAccountBlockedError is not None and isinstance(exc, _ExternalAccountBlockedError):
+        return True
+    return False
+
+
+def _is_llm_critical_error(exc: Exception) -> bool:
+    """判断是否为需要立即停止的 LLM 严重错误（429/401）"""
+    return _is_rate_limit_error(exc) or _is_account_blocked_error(exc)
 
 
 # ==============================================================================
@@ -217,6 +267,13 @@ class Constants:
 
     # 缓存
     DEFAULT_CACHE_SAVE_INTERVAL: Final[int] = 100
+    CACHE_FILE_NAME: Final[str] = ".corpus_cleaner_cache.jsonl"
+
+    # 重试机制
+    DEFAULT_MAX_RETRIES: Final[int] = 3
+    DEFAULT_RETRY_DELAY: Final[float] = 2.0
+    MAX_RETRY_DELAY: Final[float] = 60.0
+    RETRY_BACKOFF_FACTOR: Final[float] = 2.0
 
     # MD5 哈希
     MD5_HASH_LENGTH: Final[int] = 12
@@ -226,6 +283,10 @@ class Constants:
 
     # 句子边界搜索范围
     SENTENCE_BOUNDARY_SEARCH_RANGE: Final[int] = 100
+
+    # 日志滚动配置
+    MAX_LOG_BYTES: Final[int] = 500 * 1024 * 1024  # 单个日志最大 500MB
+    LOG_BACKUP_COUNT: Final[int] = 5  # 保留的历史日志文件数
 
 # ==============================================================================
 # 日志系统
@@ -283,6 +344,27 @@ class LoggerFactory:
             if cls._initialized and cls._logger is not None:
                 # 更新日志级别（允许动态调整）
                 cls._logger.setLevel(level)
+                
+                # 如果有新的 log_file，检查是否已添加文件处理器
+                if log_file:
+                    has_file_handler = any(
+                        isinstance(h, (logging.FileHandler, RotatingFileHandler)) 
+                        for h in cls._logger.handlers
+                    )
+                    if not has_file_handler:
+                        log_file.parent.mkdir(parents=True, exist_ok=True)
+                        file_formatter = cls._create_formatter(use_colors=False)
+                        file_handler = RotatingFileHandler(
+                            log_file,
+                            encoding="utf-8",
+                            mode="a",
+                            maxBytes=Constants.MAX_LOG_BYTES,
+                            backupCount=Constants.LOG_BACKUP_COUNT,
+                        )
+                        file_handler.setFormatter(file_formatter)
+                        file_handler.setLevel(level)
+                        cls._logger.addHandler(file_handler)
+                
                 return cls._logger
 
             logger = logging.getLogger(name)
@@ -302,8 +384,12 @@ class LoggerFactory:
             # 文件处理器（可选）
             if log_file:
                 log_file.parent.mkdir(parents=True, exist_ok=True)
-                file_handler = logging.FileHandler(
-                    log_file, encoding="utf-8", mode="a"
+                file_handler = RotatingFileHandler(
+                    log_file,
+                    encoding="utf-8",
+                    mode="a",
+                    maxBytes=Constants.MAX_LOG_BYTES,
+                    backupCount=Constants.LOG_BACKUP_COUNT,
                 )
                 file_handler.setFormatter(file_formatter)
                 file_handler.setLevel(level)
@@ -397,6 +483,35 @@ class UnsupportedFileTypeError(CorpusCleanerError):
 
 class LLMError(CorpusCleanerError):
     """LLM 调用相关错误"""
+    pass
+
+
+class NetworkError(CorpusCleanerError):
+    """
+    网络相关错误。
+    
+    包括但不限于：
+    - 网络超时
+    - 连接失败
+    - DNS 解析错误
+    """
+    pass
+
+
+class CacheError(CorpusCleanerError):
+    """缓存操作错误（读取/写入失败）"""
+    pass
+
+
+class FileSystemError(CorpusCleanerError):
+    """
+    文件系统操作错误。
+    
+    包括：
+    - 磁盘空间不足
+    - 文件权限问题
+    - I/O 错误
+    """
     pass
 
 # ==============================================================================
@@ -793,6 +908,394 @@ class BatchResult:
             },
             "results": [r.to_dict() for r in self.results],
         }
+
+# ==============================================================================
+# 缓存管理
+# ==============================================================================
+
+
+class ProcessingCache:
+    """
+    处理进度缓存管理器。
+    
+    功能：
+    1. **断点续运行**：记录已处理的文件，重启后跳过
+    2. **进度持久化**：定期保存到磁盘，防止数据丢失
+    3. **状态查询**：快速检查文件是否已处理
+    4. **错误跟踪**：记录失败文件，支持重试
+    
+    缓存格式（JSONL）：
+    ```json
+    {"path": "file.pdf", "status": "success", "parts": 5, "timestamp": "2024-01-01 10:00:00"}
+    {"path": "file2.pdf", "status": "failed", "error": "...", "timestamp": "..."}
+    ```
+    
+    使用示例：
+    ```python
+    cache = ProcessingCache(output_dir / ".cache.jsonl")
+    
+    # 检查文件是否已处理
+    if cache.is_processed(file_path, status="success"):
+        print("already processed, skip")
+        return
+    
+    # 处理文件...
+    try:
+        result = process_file(file_path)
+        cache.mark_processed(file_path, "success", parts=10)
+    except Exception as e:
+        cache.mark_processed(file_path, "failed", error=str(e))
+    
+    # 定期保存
+    cache.save()
+    ```
+    
+    设计特点：
+    - **线程安全**：使用锁保护共享状态
+    - **延迟写入**：批量更新内存，定期 flush 到磁盘
+    - **容错性**：缓存读取失败不影响主流程
+    - **可观测性**：记录时间戳和详细统计
+    """
+
+    def __init__(
+        self,
+        cache_path: Path,
+        auto_save_interval: int = Constants.DEFAULT_CACHE_SAVE_INTERVAL,
+    ):
+        """
+        初始化缓存管理器。
+        
+        Args:
+            cache_path: 缓存文件路径（JSONL 格式）
+            auto_save_interval: 自动保存间隔（处理文件数）
+        """
+        self.cache_path = cache_path
+        self.auto_save_interval = auto_save_interval
+        
+        # 缓存数据：path -> {status, parts, error, timestamp}
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self._dirty = False  # 标记是否有未保存的更改
+        self._operation_count = 0  # 操作计数
+        
+        # 加载已有缓存
+        self._load()
+    
+    def _load(self) -> None:
+        """
+        从磁盘加载缓存。
+        
+        容错处理：
+        - 文件不存在：创建空缓存
+        - 格式错误：记录警告并跳过
+        - JSON 解析失败：跳过损坏的行
+        """
+        if not self.cache_path.exists():
+            logger.debug(f"缓存文件不存在，将创建新缓存: {self.cache_path}")
+            return
+        
+        try:
+            with self.cache_path.open("r", encoding="utf-8") as f:
+                for line_num, line in enumerate(f, start=1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    try:
+                        entry = json.loads(line)
+                        if "path" not in entry:
+                            logger.warning(
+                                f"缓存项缺少 'path' 字段（行 {line_num}），已跳过"
+                            )
+                            continue
+                        
+                        path = entry["path"]
+                        self._cache[path] = {
+                            "status": entry.get("status", "unknown"),
+                            "parts": entry.get("parts", 0),
+                            "error": entry.get("error", ""),
+                            "timestamp": entry.get("timestamp", ""),
+                        }
+                    
+                    except json.JSONDecodeError as e:
+                        logger.warning(
+                            f"解析缓存项失败（行 {line_num}）: {e}"
+                        )
+                        continue
+            
+            logger.info(
+                f"已加载 {len(self._cache)} 条缓存记录从 {self.cache_path}"
+            )
+        
+        except OSError as e:
+            # 文件读取错误（权限、磁盘错误等）
+            logger.error(f"读取缓存文件失败: {e}")
+            logger.warning("将使用空缓存继续，但可能会重复处理文件")
+        
+        except Exception as e:
+            # 其他未预见错误
+            logger.exception(f"加载缓存时发生意外错误: {e}")
+    
+    def save(self, force: bool = False) -> bool:
+        """
+        保存缓存到磁盘。
+        
+        Args:
+            force: 是否强制保存（忽略 dirty 标记）
+        
+        Returns:
+            是否保存成功
+        
+        注意：
+        - 使用原子写入（先写临时文件，再重命名）防止数据损坏
+        - 失败时不清空内存缓存，下次依然可以重试
+        """
+        with self._lock:
+            if not force and not self._dirty:
+                logger.debug("缓存未变更，跳过保存")
+                return True
+            
+            try:
+                # 确保父目录存在
+                self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # 原子写入：先写临时文件
+                temp_path = self.cache_path.with_suffix(".tmp")
+                with temp_path.open("w", encoding="utf-8") as f:
+                    for path, info in self._cache.items():
+                        entry = {"path": path, **info}
+                        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                
+                # 原子替换
+                temp_path.replace(self.cache_path)
+                
+                self._dirty = False
+                logger.debug(f"已保存 {len(self._cache)} 条缓存记录到 {self.cache_path}")
+                return True
+            
+            except OSError as e:
+                logger.error(f"保存缓存失败（I/O 错误）: {e}")
+                return False
+            
+            except Exception as e:
+                logger.exception(f"保存缓存时发生意外错误: {e}")
+                return False
+    
+    def is_processed(
+        self,
+        file_path: Union[Path, str],
+        status: Optional[str] = None,
+    ) -> bool:
+        """
+        检查文件是否已处理。
+        
+        Args:
+            file_path: 文件路径
+            status: 指定状态过滤（例如只检查 "success"）
+        
+        Returns:
+            是否已处理
+        
+        示例：
+        ```python
+        # 检查是否已成功处理
+        if cache.is_processed(path, status="success"):
+            return
+        
+        # 检查是否曾经尝试处理（不论成败）
+        if cache.is_processed(path):
+            return
+        ```
+        """
+        path_str = str(file_path)
+        with self._lock:
+            if path_str not in self._cache:
+                return False
+            
+            if status is None:
+                return True
+            
+            return self._cache[path_str].get("status") == status
+    
+    def mark_processed(
+        self,
+        file_path: Union[Path, str],
+        status: str,
+        parts: int = 0,
+        error: str = "",
+    ) -> None:
+        """
+        标记文件为已处理。
+        
+        Args:
+            file_path: 文件路径
+            status: 处理状态 ("success", "failed", "skipped")
+            parts: 生成的片段数
+            error: 错误信息（如果失败）
+        """
+        path_str = str(file_path)
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        with self._lock:
+            self._cache[path_str] = {
+                "status": status,
+                "parts": parts,
+                "error": error,
+                "timestamp": timestamp,
+            }
+            self._dirty = True
+            self._operation_count += 1
+            
+            # 达到自动保存间隔
+            if self._operation_count >= self.auto_save_interval:
+                self.save()
+                self._operation_count = 0
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        获取缓存统计信息。
+        
+        Returns:
+            统计信息字典
+        """
+        with self._lock:
+            total = len(self._cache)
+            success = sum(1 for v in self._cache.values() if v["status"] == "success")
+            failed = sum(1 for v in self._cache.values() if v["status"] == "failed")
+            skipped = sum(1 for v in self._cache.values() if v["status"] == "skipped")
+            
+            return {
+                "total": total,
+                "success": success,
+                "failed": failed,
+                "skipped": skipped,
+                "cache_path": str(self.cache_path),
+            }
+    
+    def clear(self) -> None:
+        """
+        清空缓存（内存和磁盘）。
+        
+        警告：此操作不可逆！
+        """
+        with self._lock:
+            self._cache.clear()
+            self._dirty = True
+            if self.cache_path.exists():
+                try:
+                    self.cache_path.unlink()
+                    logger.info(f"已清空缓存: {self.cache_path}")
+                except OSError as e:
+                    logger.error(f"删除缓存文件失败: {e}")
+    
+    def __enter__(self) -> "ProcessingCache":
+        """支持上下文管理器协议。"""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """退出时自动保存缓存。"""
+        self.save(force=True)
+    
+    def __len__(self) -> int:
+        """返回缓存项数量。"""
+        with self._lock:
+            return len(self._cache)
+
+
+# ==============================================================================
+# 工具装饰器
+# ==============================================================================
+
+
+def retry_on_network_error(
+    max_retries: int = Constants.DEFAULT_MAX_RETRIES,
+    initial_delay: float = Constants.DEFAULT_RETRY_DELAY,
+    backoff_factor: float = Constants.RETRY_BACKOFF_FACTOR,
+    max_delay: float = Constants.MAX_RETRY_DELAY,
+):
+    """
+    重试装饰器：仅针对网络错误进行重试。
+    
+    重要：
+    - **429 限流错误不重试**：直接抛出，由上层处理
+    - **账号封禁不重试**：直接抛出
+    - **网络超时会重试**：这是瞬时错误，可以重试
+    
+    Args:
+        max_retries: 最大重试次数（0 表示不重试）
+        initial_delay: 初始延迟秒数
+        backoff_factor: 退避因子
+        max_delay: 最大延迟秒数
+    
+    使用示例：
+    ```python
+    @retry_on_network_error(max_retries=3, initial_delay=2.0)
+    def call_llm_api(prompt: str) -> str:
+        response = llm_backend.chat(prompt)
+        return response
+    ```
+    
+    重试策略：
+    - 429 限流：立即抛出，不重试
+    - 网络超时：指数退避重试
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception: Optional[Exception] = None
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                
+                except Exception as e:
+                    # 检查是否为 LLM 严重错误（429/401）
+                    if _is_account_blocked_error(e):
+                        # 账号封禁，不重试，直接抛出
+                        logger.error(
+                            f"账号被封禁或鉴权失败 (401): {func.__name__}"
+                        )
+                        raise _InternalAccountBlockedError(str(e)) from e
+                    
+                    if _is_rate_limit_error(e):
+                        # 429 限流错误：不重试，直接抛出，交给上层处理
+                        logger.error(
+                            f"LLM 限流 (429)，立即停止: {func.__name__}"
+                        )
+                        raise _InternalRateLimitError(str(e)) from e
+                    
+                    # 网络错误（超时、连接失败等）可以重试
+                    if isinstance(e, (OSError, IOError)):
+                        last_exception = e
+                        
+                        if attempt >= max_retries:
+                            logger.error(
+                                f"网络错误，已达最大重试次数: {e}"
+                            )
+                            raise NetworkError(f"网络请求失败: {e}") from e
+                        
+                        delay = min(
+                            initial_delay * (backoff_factor ** attempt),
+                            max_delay
+                        )
+                        
+                        logger.warning(
+                            f"网络错误，第 {attempt + 1}/{max_retries} 次重试: {e}"
+                        )
+                        time.sleep(delay)
+                        continue
+                    
+                    # 其他异常直接抛出
+                    raise
+            
+            # 理论上不会走到这里
+            if last_exception:
+                raise last_exception
+            raise RuntimeError(f"{func.__name__} 重试失败")
+        
+        return wrapper
+    return decorator
+
 
 # ==============================================================================
 # 配置类定义
@@ -2268,6 +2771,7 @@ class LLMSemanticSplitter:
         min_chars: int = Constants.DEFAULT_MIN_CHARS,
         max_chars: int = Constants.DEFAULT_MAX_CHARS,
         fallback_splitter: Optional[SmartSplitter] = None,
+        show_llm_output: bool = False,
     ):
         """
         初始化 LLM 语义切分器。
@@ -2277,6 +2781,7 @@ class LLMSemanticSplitter:
             min_chars: 子段落最小字符数
             max_chars: 子段落最大字符数
             fallback_splitter: 失败时的回退切分器
+            show_llm_output: 是否打印 LLM 调用信息（控制台，不写日志）
         """
         self.config = config
         self.min_chars = min_chars
@@ -2284,6 +2789,7 @@ class LLMSemanticSplitter:
         self.fallback_splitter = fallback_splitter or SmartSplitter(
             SplitterConfig(min_chars=min_chars, max_chars=max_chars)
         )
+        self.show_llm_output = show_llm_output
 
         # LLM 后端（延迟初始化）
         self._llm_backend = None
@@ -2301,20 +2807,45 @@ class LLMSemanticSplitter:
             _ensure_llm_imports()
 
             if _LLMFactory is None:
-                logger.warning("LLM 模块不可用，将使用规则切分")
+                if self.show_llm_output:
+                    print("❌ LLM 模块不可用，请检查 kg/llm_core.py 是否存在")
+                logger.warning(
+                    f"LLM 后端初始化失败: LLM 模块不可用 (provider={self.config.provider}, model={self.config.model_name})"
+                )
                 return None
 
             try:
                 self._llm_backend = _LLMFactory.create(
                     self.config.to_factory_dict())
-                logger.debug(
-                    f"已初始化 LLM 后端: {self.config.provider}/{self.config.model_name}"
+                if self.show_llm_output:
+                    print(f"✅ LLM 后端初始化成功: {self.config.provider}/{self.config.model_name}")
+                logger.info(
+                    f"LLM 后端初始化成功: provider={self.config.provider}, model={self.config.model_name}"
                 )
             except Exception as e:
-                logger.error(f"初始化 LLM 后端失败: {e}")
+                if self.show_llm_output:
+                    print(f"❌ LLM 后端初始化失败: {e}")
+                logger.error(
+                    f"LLM 后端初始化失败: provider={self.config.provider}, model={self.config.model_name}, error={e}"
+                )
 
         return self._llm_backend
 
+    def validate_backend(self) -> bool:
+        """
+        验证 LLM 后端是否可用。
+        
+        用于在程序启动时提前检测 LLM 后端状态，
+        如果不可用则可以及早退出，避免处理文件时才发现问题。
+        
+        Returns:
+            True 如果 LLM 后端已成功初始化，False 否则
+        """
+        # 触发延迟初始化
+        backend = self.llm_backend
+        return backend is not None
+
+    @retry_on_network_error(max_retries=3, initial_delay=2.0)
     def split(self, text: str) -> List[str]:
         """
         使用 LLM 进行语义切分。
@@ -2324,21 +2855,67 @@ class LLMSemanticSplitter:
 
         Returns:
             切分后保留的子段落列表
+        
+        注意：
+        - 429 错误直接抛出，不重试
+        - 网络超时会自动重试
+        - 其他错误会回退到规则切分
         """
         # 文本过短，直接返回
         if not text or len(text.strip()) < self.min_chars:
+            logger.debug(f"文本过短({len(text.strip())} 字符)，跳过 LLM 切分")
             return [text.strip()] if text and text.strip() else []
 
-        # 检查 LLM 是否可用
+        # 在调用 LLM 之前打印信息（确保即使失败也能看到）
+        if self.show_llm_output:
+            print(f"\n{'='*60}")
+            print(f"🤖 LLM 调用信息")
+            print(f"{'='*60}")
+            print(f"  • 厂商: {self.config.provider}")
+            print(f"  • 模型: {self.config.model_name}")
+            print(f"  • 温度: {self.config.temperature}")
+            print(f"  • 输入长度: {len(text)} 字符")
+            print(f"{'='*60}")
+            print(f"🔄 正在调用 LLM...")
+
+        # 检查 LLM 是否可用 - 如果启用了 LLM 切分但后端不可用，直接抛出异常
         if self.llm_backend is None:
-            logger.debug("LLM 不可用，使用规则切分")
-            return self.fallback_splitter.split(text)
+            error_msg = (
+                f"LLM 后端不可用，无法进行语义切分 "
+                f"(provider={self.config.provider}, model={self.config.model_name})"
+            )
+            if self.show_llm_output:
+                print(f"❌ {error_msg}")
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+        
+        # LLM 后端初始化成功，打印 API Key 信息
+        if self.show_llm_output:
+            # 尝试从 llm_backend 获取实际使用的 API Key
+            actual_api_key = None
+            if hasattr(self.llm_backend, 'api_key'):
+                actual_api_key = self.llm_backend.api_key
+            elif hasattr(self.llm_backend, 'client') and hasattr(self.llm_backend.client, 'api_key'):
+                actual_api_key = self.llm_backend.client.api_key
+            
+            if actual_api_key:
+                api_key_display = "***" + actual_api_key[-6:] if len(actual_api_key) > 6 else "已配置"
+            elif self.config.api_key:
+                api_key_display = "***" + self.config.api_key[-6:] if len(self.config.api_key) > 6 else "已配置"
+            else:
+                api_key_display = "未配置（使用环境变量）"
+            
+            print(f"  • API Key: {api_key_display}")
 
         # 构建用户提示词
         user_prompt = self._build_user_prompt(text)
 
         try:
             # 调用 LLM
+            logger.info(
+                f"LLM 调用开始 provider={self.config.provider}, model={self.config.model_name}, "
+                f"temp={self.config.temperature}, text_len={len(text)}"
+            )
             response = self.llm_backend.chat_messages(
                 [
                     {"role": "system", "content": self.SYSTEM_PROMPT},
@@ -2348,24 +2925,57 @@ class LLMSemanticSplitter:
                 response_format={"type": "json_object"},
             )
 
+            # 打印 LLM 输出（只打印到控制台，不写日志）
+            if self.show_llm_output:
+                print(f"\n✅ LLM 响应成功 ({len(response)} 字符):")
+                print(f"{'~'*60}")
+                # 截取显示，避免输出过长
+                display_response = response[:1000] + "..." if len(response) > 1000 else response
+                print(display_response)
+                print(f"{'~'*60}\n")
+            # 记录到日志（截断）
+            truncated = response[:2000] + ("..." if len(response) > 2000 else "")
+            logger.info(f"LLM 响应截断(最多2000字符): {truncated}")
+
             # 解析结果
             segments = self._parse_response(response)
             if segments:
-                logger.debug(f"LLM 切分成功，得到 {len(segments)} 个段落")
+                if self.show_llm_output:
+                    print(f"✅ 切分结果: {len(segments)} 个有效段落")
+                logger.info(f"✅ LLM 切分成功: {len(segments)} 个段落，原文长度 {len(text)} 字符")
                 return segments
 
-            logger.warning("LLM 返回空结果，回退到规则切分")
+            logger.warning(f"⚠️ LLM 返回空结果，回退到规则切分 (text_len={len(text)})")
+            if self.show_llm_output:
+                print(f"⚠️ LLM 返回空结果，回退到规则切分")
 
-        except _RateLimitError:
-            logger.warning("LLM 调用遇到限流")
-            raise
-        except _AccountBlockedError:
-            logger.error("LLM 账号被封禁")
-            raise
         except Exception as e:
-            logger.warning(f"LLM 语义切分失败: {e}，回退到规则切分")
+            # 打印错误信息
+            if self.show_llm_output:
+                print(f"\n❌ LLM 调用失败: {e}")
+            logger.warning(f"❌ LLM 调用失败: {e}, text_len={len(text)}")
 
-        # 回退到规则切分
+            # 429 限流：优雅退出（交给上层保存缓存并终止）
+            if _is_rate_limit_error(e):
+                logger.error("⚠️ LLM 调用遇到限流 (429)，立即停止")
+                raise _InternalRateLimitError(str(e)) from e
+
+            # 401 账号问题：立即停止
+            if _is_account_blocked_error(e):
+                logger.error("❌ LLM 账号被封禁 (401)")
+                raise _InternalAccountBlockedError(str(e)) from e
+
+            # 网络异常：让装饰器处理重试/退避
+            if isinstance(e, (OSError, IOError)):
+                raise
+
+            # 解析/其他异常：回退到规则切分
+            logger.info(f"⚠️ LLM 语义切分失败，回退到规则切分: {e}")
+            logger.info(f"⚠️ 回退到规则切分 (text_len={len(text)})")
+            return self.fallback_splitter.split(text)
+
+        # 正常回退到规则切分
+        logger.info(f"⚠️ 回退到规则切分 (text_len={len(text)})")
         return self.fallback_splitter.split(text)
 
     def _build_user_prompt(self, text: str) -> str:
@@ -2987,11 +3597,15 @@ class FileProcessor:
                 processing_time_seconds=time.time() - start_time,
             )
 
-        except (_RateLimitError, _AccountBlockedError):
-            # 重新抛出限流和封禁错误，让上层处理
+        except (_InternalRateLimitError, _InternalAccountBlockedError):
+            # 重新抛出 LLM 严重错误，让上层处理
             raise
 
         except Exception as e:
+            # 检查是否为外部 LLM 模块的限流/封禁错误
+            if _is_llm_critical_error(e):
+                raise
+            
             logger.error(f"处理失败: {path}, 错误: {e}")
             return ProcessingResult(
                 path=path,
@@ -3010,9 +3624,12 @@ class FileProcessor:
         if self.use_llm_split and self.llm_splitter:
             try:
                 parts = self.llm_splitter.split(text)
-            except (_RateLimitError, _AccountBlockedError):
+            except (_InternalRateLimitError, _InternalAccountBlockedError):
                 raise
             except Exception as e:
+                # 检查是否为外部 LLM 错误
+                if _is_llm_critical_error(e):
+                    raise
                 logger.warning(f"LLM 切分失败，回退到规则切分: {e}")
 
         # 回退或默认使用规则切分
@@ -3029,11 +3646,24 @@ class FileProcessor:
 class BatchProcessor:
     """
     批量文件处理器。
+    
     特点：
-    - 并行处理：使用线程池加速批量任务
-    - 进度追踪：实时显示处理进度
-    - 错误恢复：单个文件失败不影响其他文件
-    - 优雅中断：支持 Ctrl+C 中断后保存进度
+    - **并行处理**：使用线程池加速批量任务
+    - **进度追踪**：实时显示处理进度
+    - **错误恢复**：单个文件失败不影响其他文件
+    - **优雅中断**：支持 Ctrl+C 中断后保存进度
+    - **断点续运行**：自动跳过已成功处理的文件
+    - **429 错误处理**：遇到限流后保存进度并退出
+    
+    使用示例：
+    ```python
+    processor = BatchProcessor(
+        file_processor=file_proc,
+        max_workers=4,
+        cache=ProcessingCache(output_dir / ".cache.jsonl"),
+    )
+    result = processor.process(source_dir)
+    ```
     """
 
     def __init__(
@@ -3041,6 +3671,8 @@ class BatchProcessor:
         file_processor: FileProcessor,
         max_workers: int = Constants.DEFAULT_MAX_WORKERS,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        cache: Optional[ProcessingCache] = None,
+        skip_processed: bool = True,
     ):
         """
         初始化批量处理器。
@@ -3049,11 +3681,16 @@ class BatchProcessor:
             file_processor: 单文件处理器
             max_workers: 最大并行工作线程数
             progress_callback: 进度回调函数 (current, total, filename)
+            cache: 处理缓存（支持断点续运行）
+            skip_processed: 是否跳过已成功处理的文件
         """
         self.file_processor = file_processor
         self.max_workers = max_workers
         self.progress_callback = progress_callback
+        self.cache = cache
+        self.skip_processed = skip_processed
         self._interrupted = False
+        self._rate_limit_hit = False  # 标记是否遇到 429 错误
 
     def collect_files(self, source: Path) -> List[Path]:
         """
@@ -3091,6 +3728,7 @@ class BatchProcessor:
         self,
         source: Path,
         source_root: Optional[Path] = None,
+        files: Optional[List[Path]] = None,
     ) -> BatchResult:
         """
         批量处理文件。
@@ -3098,19 +3736,24 @@ class BatchProcessor:
         Args:
             source: 源路径
             source_root: 用于计算相对路径的根目录
+            files: 可选的文件列表，如果传入则直接使用，否则调用 collect_files
 
         Returns:
             批量处理结果
         """
         start_time = time.time()
 
-        # 收集文件
-        files = self.collect_files(source)
-        if not files:
-            logger.warning(f"未找到可处理的文件: {source}")
-            return BatchResult()
-
-        logger.info(f"收集到 {len(files)} 个待处理文件")
+        # 收集文件（如果外部未传入）
+        if files is None:
+            files = self.collect_files(source)
+            if not files:
+                logger.warning(f"未找到可处理的文件: {source}")
+                return BatchResult()
+            logger.info(f"收集到 {len(files)} 个待处理文件")
+        else:
+            if not files:
+                logger.warning("传入的文件列表为空")
+                return BatchResult()
 
         result = BatchResult()
         root = source_root or (source if source.is_dir() else source.parent)
@@ -3134,29 +3777,99 @@ class BatchProcessor:
         root: Path,
         result: BatchResult,
     ) -> None:
-        """顺序处理文件"""
+        """
+        顺序处理文件。
+        
+        功能增强：
+        1. 支持缓存检查，跳过已处理的文件
+        2. 捕获 429 错误并保存进度
+        3. 记录详细的处理状态
+        """
         for i, path in enumerate(files):
-            if self._interrupted:
+            # 检查中断标志
+            if self._interrupted or self._rate_limit_hit:
                 break
 
             if self.progress_callback:
                 self.progress_callback(i + 1, len(files), path.name)
+            
+            # 检查缓存：跳过已成功处理的文件
+            if self.cache and self.skip_processed:
+                if self.cache.is_processed(path, status="success"):
+                    logger.debug(f"跳过已处理的文件: {path.name}")
+                    result.add_result(ProcessingResult(
+                        path=path,
+                        status=ProcessingStatus.SKIPPED,
+                        message="已在缓存中，跳过",
+                    ))
+                    continue
 
             try:
                 rel_dir = self._get_relative_dir(path, root)
                 proc_result = self.file_processor.process(path, rel_dir)
                 result.add_result(proc_result)
                 self._log_result(proc_result)
+                
+                # 更新缓存
+                if self.cache:
+                    if proc_result.status == ProcessingStatus.SUCCESS:
+                        self.cache.mark_processed(
+                            path, "success", parts=proc_result.parts_count
+                        )
+                    elif proc_result.status == ProcessingStatus.FAILED:
+                        self.cache.mark_processed(
+                            path, "failed", error=proc_result.message
+                        )
+                    elif proc_result.status == ProcessingStatus.SKIPPED:
+                        self.cache.mark_processed(
+                            path, "skipped", error=proc_result.message
+                        )
 
-            except (_RateLimitError, _AccountBlockedError) as e:
-                logger.error(f"遇到限流/封禁错误，停止处理: {e}")
+            except (_InternalRateLimitError, _InternalAccountBlockedError) as e:
+                # 429 限流/封禁错误：不写入缓存，直接停止
+                logger.error(f"遇到 LLM 限流/封禁错误，立即停止处理: {e}")
+                self._rate_limit_hit = True
+                
+                # 不将当前文件写入缓存（不标记为 failed）
+                # 下次运行时可以重新处理这个文件
+                
+                # 保存已成功处理的缓存
+                if self.cache:
+                    self.cache.save(force=True)
+                    logger.info(
+                        f"已保存处理进度到缓存: {self.cache.cache_path}\n"
+                        f"当前文件未写入缓存，下次运行时会重新处理"
+                    )
+                
+                break
+            
+            except Exception as e:
+                # 检查是否为外部 LLM 模块的限流/封禁错误
+                if _is_llm_critical_error(e):
+                    logger.error(f"遇到 LLM 限流/封禁错误，立即停止处理: {e}")
+                    self._rate_limit_hit = True
+                    if self.cache:
+                        self.cache.save(force=True)
+                        logger.info(
+                            f"已保存处理进度到缓存: {self.cache.cache_path}\n"
+                            f"当前文件未写入缓存，下次运行时会重新处理"
+                        )
+                    break
+                
+                # 其他异常：记录为处理失败，写入缓存，继续下一个文件
+                logger.error(f"处理文件失败: {path.name}, 错误: {e}")
                 result.add_result(ProcessingResult(
                     path=path,
                     status=ProcessingStatus.FAILED,
                     message=str(e),
                     error_type=type(e).__name__,
+                    error_traceback=traceback.format_exc(),
                 ))
-                break
+                
+                if self.cache:
+                    self.cache.mark_processed(
+                        path, "failed", error=str(e)
+                    )
 
     def _process_parallel(
         self,
@@ -3164,11 +3877,41 @@ class BatchProcessor:
         root: Path,
         result: BatchResult,
     ) -> None:
-        """并行处理文件"""
+        """
+        并行处理文件。
+        
+        功能增强：
+        1. 支持缓存检查，跳过已处理的文件
+        2. 捕莹 429 错误并立即停止所有任务
+        3. 线程安全的缓存更新
+        4. 优雅处理线程池关闭
+        
+        注意：
+        - 并行处理时遇到 429 会立即取消所有剩余任务
+        - 缓存更新是线程安全的（ProcessingCache 内部有锁）
+        """
+        # 预先过滤已处理的文件
+        files_to_process: List[Path] = []
+        for path in files:
+            if self.cache and self.skip_processed:
+                if self.cache.is_processed(path, status="success"):
+                    logger.debug(f"跳过已处理的文件: {path.name}")
+                    result.add_result(ProcessingResult(
+                        path=path,
+                        status=ProcessingStatus.SKIPPED,
+                        message="已在缓存中，跳过",
+                    ))
+                    continue
+            files_to_process.append(path)
+        
+        if not files_to_process:
+            logger.info("所有文件已处理，无需重复执行")
+            return
+        
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             # 提交任务
             future_to_path: Dict[Future, Path] = {}
-            for path in files:
+            for path in files_to_process:
                 rel_dir = self._get_relative_dir(path, root)
                 future = executor.submit(
                     self.file_processor.process, path, rel_dir
@@ -3178,7 +3921,9 @@ class BatchProcessor:
             # 收集结果
             completed = 0
             for future in as_completed(future_to_path):
-                if self._interrupted:
+                # 检查是否应该中断
+                if self._interrupted or self._rate_limit_hit:
+                    logger.warning("检测到中断或限流，取消剩余任务...")
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
 
@@ -3186,30 +3931,76 @@ class BatchProcessor:
                 path = future_to_path[future]
 
                 if self.progress_callback:
-                    self.progress_callback(completed, len(files), path.name)
+                    self.progress_callback(completed, len(files_to_process), path.name)
 
                 try:
                     proc_result = future.result()
                     result.add_result(proc_result)
                     self._log_result(proc_result)
+                    
+                    # 更新缓存（线程安全）
+                    if self.cache:
+                        if proc_result.status == ProcessingStatus.SUCCESS:
+                            self.cache.mark_processed(
+                                path, "success", parts=proc_result.parts_count
+                            )
+                        elif proc_result.status == ProcessingStatus.FAILED:
+                            self.cache.mark_processed(
+                                path, "failed", error=proc_result.message
+                            )
+                        elif proc_result.status == ProcessingStatus.SKIPPED:
+                            self.cache.mark_processed(
+                                path, "skipped", error=proc_result.message
+                            )
 
-                except (_RateLimitError, _AccountBlockedError) as e:
-                    logger.error(f"遇到限流/封禁错误: {e}")
-                    result.add_result(ProcessingResult(
-                        path=path,
-                        status=ProcessingStatus.FAILED,
-                        message=str(e),
-                        error_type=type(e).__name__,
-                    ))
+                except (_InternalRateLimitError, _InternalAccountBlockedError) as e:
+                    # 429 限流/封禁错误：不写入缓存，直接停止
+                    logger.error(f"遇到 LLM 限流/封禁错误，立即停止处理: {e}")
+                    self._rate_limit_hit = True
+                    
+                    # 不将当前文件写入缓存（不标记为 failed）
+                    # 下次运行时可以重新处理这个文件
+                    
+                    # 保存已成功处理的缓存
+                    if self.cache:
+                        self.cache.save(force=True)
+                        logger.info(
+                            f"已保存处理进度到缓存: {self.cache.cache_path}\n"
+                            f"当前文件未写入缓存，下次运行时会重新处理"
+                        )
+                    
+                    # 取消剩余任务
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
 
                 except Exception as e:
-                    logger.error(f"处理异常: {path}, 错误: {e}")
+                    # 检查是否为外部 LLM 模块的限流/封禁错误
+                    if _is_llm_critical_error(e):
+                        logger.error(f"遇到 LLM 限流/封禁错误，立即停止处理: {e}")
+                        self._rate_limit_hit = True
+                        if self.cache:
+                            self.cache.save(force=True)
+                            logger.info(
+                                f"已保存处理进度到缓存: {self.cache.cache_path}\n"
+                                f"当前文件未写入缓存，下次运行时会重新处理"
+                            )
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    
+                    # 其他异常：记录为处理失败，写入缓存，继续下一个文件
+                    logger.error(f"处理文件失败: {path}, 错误: {e}")
                     result.add_result(ProcessingResult(
                         path=path,
                         status=ProcessingStatus.FAILED,
                         message=str(e),
                         error_type=type(e).__name__,
+                        error_traceback=traceback.format_exc(),
                     ))
+                    
+                    if self.cache:
+                        self.cache.mark_processed(
+                            path, "failed", error=str(e)
+                        )
 
     @staticmethod
     def _get_relative_dir(path: Path, root: Path) -> Optional[Path]:
@@ -3427,7 +4218,27 @@ LLM_TEMPERATURE   - 温度参数
         "--log-file",
         type=str,
         default=None,
-        help="日志文件路径",
+        help="日志文件路径（可以是目录，会自动生成文件名）",
+    )
+    run_group.add_argument(
+        "--show-llm-output",
+        action="store_true",
+        help="在控制台打印 LLM 调用信息和输出（不写入日志）",
+    )
+    run_group.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="禁用缓存，不支持断点续运行",
+    )
+    run_group.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="清空缓存，重新处理所有文件",
+    )
+    run_group.add_argument(
+        "--clear-output",
+        action="store_true",
+        help="处理前清空输出目录（慎用，会删除 output-dir 下现有文件）",
     )
 
     return parser
@@ -3470,9 +4281,30 @@ def run_cli() -> int:
 
     # 配置日志
     log_level = logging.DEBUG if args.verbose else logging.INFO
-    log_file = Path(args.log_file) if args.log_file else None
+    log_file: Optional[Path] = None
+    if args.log_file:
+        log_file = Path(args.log_file)
+        # 处理日志文件路径
+        if log_file.exists() and log_file.is_dir():
+            # 路径是已存在的目录，自动生成文件名
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_file = log_file / f"corpus_cleaner_{timestamp}.log"
+        elif not log_file.suffix:
+            # 没有后缀名，当作目录处理
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            log_file.mkdir(parents=True, exist_ok=True)
+            log_file = log_file / f"corpus_cleaner_{timestamp}.log"
+        # 确保父目录存在
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+    
     global logger
     logger = LoggerFactory.get_logger(level=log_level, log_file=log_file)
+    
+    if log_file:
+        print(f"📝 日志文件: {log_file}")
+        logger.info(f"日志将写入: {log_file}")
 
     try:
         # 加载配置
@@ -3487,6 +4319,32 @@ def run_cli() -> int:
             return 1
 
         output_dir = config.output_dir or Path(args.output_dir)
+        
+        # 创建缓存（支持断点续运行）
+        cache: Optional[ProcessingCache] = None
+        if not args.no_cache:
+            cache_path = output_dir / Constants.CACHE_FILE_NAME
+            cache = ProcessingCache(cache_path)
+            
+            # 清空缓存（如果请求）
+            if args.clear_cache:
+                logger.info("清空缓存，将重新处理所有文件...")
+                cache.clear()
+            else:
+                # 显示缓存统计
+                stats = cache.get_stats()
+                if stats["total"] > 0:
+                    logger.info(
+                        f"加载缓存: {stats['success']} 成功, "
+                        f"{stats['failed']} 失败, {stats['skipped']} 跳过"
+                    )
+
+        # 如需清空输出目录
+        if args.clear_output and output_dir.exists():
+            import shutil
+            shutil.rmtree(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"已清空输出目录: {output_dir}")
 
         # 创建组件
         extractor_factory = ExtractorFactory(pdf_engine=config.pdf_engine)
@@ -3495,12 +4353,40 @@ def run_cli() -> int:
 
         llm_splitter = None
         if config.use_llm_split and config.llm:
+            # 如果启用了 show_llm_output，强制使用单线程以避免输出混乱
+            show_llm_output = args.show_llm_output
+            if show_llm_output and config.max_workers > 1:
+                print("⚠️  启用 --show-llm-output 时自动切换到单线程模式 (--workers 1)")
+                config.max_workers = 1
+            
             llm_splitter = LLMSemanticSplitter(
                 config=config.llm,
                 min_chars=config.splitter.min_chars,
                 max_chars=config.splitter.max_chars,
                 fallback_splitter=splitter,
+                show_llm_output=show_llm_output,
             )
+            
+            # 启用 LLM 切分时，立即验证后端是否可用
+            # 如果不可用，直接退出程序，不允许回退到规则切分
+            print("\n🔍 正在验证 LLM 后端...")
+            if not llm_splitter.validate_backend():
+                error_msg = (
+                    f"\n❌ LLM 后端初始化失败\n"
+                    f"   厂商: {config.llm.provider}\n"
+                    f"   模型: {config.llm.model_name}\n\n"
+                    f"您启用了 --llm-split 参数，要求使用 LLM 进行语义切分。\n"
+                    f"但 LLM 后端不可用，无法继续执行。\n\n"
+                    f"请检查：\n"
+                    f"  1. kg/llm_core.py 模块是否存在\n"
+                    f"  2. API Key 是否正确配置\n"
+                    f"  3. 环境变量 ZHIPUAI_API_KEY / OPENAI_API_KEY 是否设置\n\n"
+                    f"如果想使用规则切分，请移除 --llm-split 参数\n"
+                )
+                print(error_msg)
+                logger.error("LLM 后端初始化失败，程序退出")
+                return 1
+            print("✅ LLM 后端验证通过\n")
 
         meta_extractor = MetadataExtractor(
             default_source_type=args.source_type,
@@ -3525,17 +4411,23 @@ def run_cli() -> int:
         # 创建进度回调
         def progress_callback(current: int, total: int, filename: str) -> None:
             percent = (current / total) * 100
-            # 使用回车符实现进度覆盖
-            print(
-                f"\r⏳ 进度: [{current}/{total}] {percent:5.1f}% | {filename[:40]:<40}",
-                end="",
-                flush=True,
-            )
+            if args.show_llm_output:
+                # show_llm_output 模式下使用换行打印，避免覆盖 LLM 输出
+                print(f"\n⏳ 进度: [{current}/{total}] {percent:5.1f}% | {filename}")
+            else:
+                # 正常模式使用回车符实现进度覆盖
+                print(
+                    f"\r⏳ 进度: [{current}/{total}] {percent:5.1f}% | {filename[:40]:<40}",
+                    end="",
+                    flush=True,
+                )
 
         batch_processor = BatchProcessor(
             file_processor=file_processor,
             max_workers=config.max_workers,
             progress_callback=progress_callback,
+            cache=cache,
+            skip_processed=not args.clear_cache,  # 如果清空缓存，不跳过
         )
 
         # 收集文件
@@ -3558,33 +4450,141 @@ def run_cli() -> int:
             print(f"\n共 {len(files)} 个文件")
             return 0
 
-        # 执行处理
+        # 执行处理（传入已截取的文件列表）
         result = batch_processor.process(
             source=input_path,
             source_root=input_path if input_path.is_dir() else input_path.parent,
+            files=files,
         )
 
         # 清除进度条
         print()
+        
+        # 最终保存缓存
+        if cache:
+            cache.save(force=True)
+            logger.info(f"处理结束，缓存已保存: {cache.cache_path}")
 
         # 生成索引
         output_manager.generate_index(result)
 
         # 打印结果摘要
         print(result.summary(verbose=args.verbose))
+        
+        # 检查是否遇到 429 错误
+        if batch_processor._rate_limit_hit:
+            logger.warning(
+                "\n⚠️  检测到 LLM 限流错误 (429)\n"
+                "处理进度已保存，可稍后重新运行命令继续处理。\n"
+                "建议：\n"
+                "  1. 等待几分钟后重试\n"
+                "  2. 检查 API 配额是否充足\n"
+                "  3. 减少并行线程数 (--workers 1)\n"
+                "  4. 禁用 LLM 切分（移除 --llm-split 参数）"
+            )
+            return 2  # 使用特定退出码表示限流
 
         return 0 if result.failed_count == 0 else 1
 
     except KeyboardInterrupt:
         print("\n\n⚠️ 用户中断处理")
+        # 保存缓存
+        if 'cache' in locals() and cache:
+            cache.save(force=True)
+            logger.info(f"已保存处理进度到: {cache.cache_path}")
         return 130
+    
+    except (_InternalRateLimitError, _InternalAccountBlockedError) as e:
+        # LLM 严重错误：保存进度并退出
+        print("\n")
+        is_rate_limit = isinstance(e, _InternalRateLimitError)
+        error_type = "LLM 限流错误 (429)" if is_rate_limit else "账号错误 (401)"
+        
+        if is_rate_limit:
+            logger.error(
+                f"\n❌ {error_type}: {e}\n\n"
+                "该错误通常表示 API 配额不足。\n\n"
+                "已保存操作：\n"
+                "  ✔ 所有已成功切分的文件已写入输出目录\n"
+                "  ✔ 处理进度已保存到缓存\n"
+                "  ✖ 当前文件未标记为已处理（下次会重新处理）\n\n"
+                "建议操作：\n"
+                "  1. 等待 API 配额恢复\n"
+                "  2. 重新运行相同命令继续处理\n"
+                "  3. 已处理的文件会自动跳过"
+            )
+            exit_code = 2
+        else:
+            logger.error(
+                f"\n❌ {error_type}: {e}\n\n"
+                "该错误通常表示：\n"
+                "  - API Key 无效或已过期\n"
+                "  - 账号被封禁\n"
+                "  - 权限不足\n\n"
+                "已保存操作：\n"
+                "  ✔ 所有已成功切分的文件已写入输出目录\n"
+                "  ✔ 处理进度已保存到缓存\n\n"
+                "建议操作：\n"
+                "  1. 检查 API Key 是否正确\n"
+                "  2. 确认账号状态正常\n"
+                "  3. 检查环境变量配置"
+            )
+            exit_code = 3
+        
+        if 'cache' in locals() and cache:
+            cache.save(force=True)
+            logger.info(f"缓存已保存: {cache.cache_path}")
+        return exit_code
 
     except ConfigurationError as e:
         logger.error(f"配置错误: {e}")
         return 1
+    
+    except FileSystemError as e:
+        print("\n")
+        logger.error(
+            f"文件系统错误: {e}\n"
+            "请检查：\n"
+            "  1. 磁盘空间是否充足\n"
+            "  2. 输出目录是否有写入权限\n"
+            "  3. 文件路径是否合法"
+        )
+        if 'cache' in locals() and cache:
+            cache.save(force=True)
+            logger.info(f"已保存处理进度到: {cache.cache_path}")
+        return 1
+    
+    except NetworkError as e:
+        print("\n")
+        logger.error(
+            f"网络错误: {e}\n"
+            "请检查：\n"
+            "  1. 网络连接是否正常\n"
+            "  2. LLM API 地址是否可访问\n"
+            "  3. 防火墙设置是否阻挡请求"
+        )
+        if 'cache' in locals() and cache:
+            cache.save(force=True)
+            logger.info(f"已保存处理进度到: {cache.cache_path}")
+        return 1
 
     except Exception as e:
+        # 其他未预见错误：保存缓存后退出
+        print("\n")
         logger.exception(f"处理过程中发生错误: {e}")
+        
+        # 保存缓存
+        if 'cache' in locals() and cache:
+            cache.save(force=True)
+            logger.info(f"已保存处理进度到: {cache.cache_path}")
+        
+        logger.error(
+            "\n如果问题持续，请尝试：\n"
+            "  1. 使用 --verbose 参数查看详细日志\n"
+            "  2. 检查输入文件是否损坏\n"
+            "  3. 减少并行线程数 (--workers 1)\n"
+            "  4. 已处理的文件已保存，可重新运行继续"
+        )
         return 1
 
 # ==============================================================================
