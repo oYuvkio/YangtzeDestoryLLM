@@ -1,4 +1,28 @@
-# scripts/run_p4_batch.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+P4 文献驱动 TBox 增强批处理脚本。
+
+该脚本从指定语料目录读取文献，调用 LLM 生成模式增强建议，
+并根据支持度聚合建议，生成增强后的 TBox。
+
+用法示例:
+    # 基础用法
+    python scripts/run_p4_batch.py \
+        --base-tbox outputs/cq_pipeline/final/p3_tbox_normalized.json \
+        --corpus-dir data/enhancing_onto_corpus_docs
+    
+    # 仅合并（跳过 LLM 调用）
+    python scripts/run_p4_batch.py --merge-only \
+        --agg-file outputs/cq_pipeline/process/p4_corpus_suggestions_agg.json
+    
+    # 多配置生成
+    python scripts/run_p4_batch.py \
+        --base-tbox outputs/p3_tbox.json \
+        --corpus-dir data/p4_corpus \
+        --extra-supports 1,3 \
+        --allow-new-classes
+"""
 import json
 import argparse
 from datetime import datetime
