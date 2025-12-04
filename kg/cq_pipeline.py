@@ -239,7 +239,8 @@ class CQLLMPipeline:
         for cls in schema.classes:
             canonical_name = alias_map.get(cls.name, cls.name)
             # 简单标准化：地名别名等做归一
-            canonical_name = normalizer.normalize(canonical_name, "location") if canonical_name else canonical_name
+            canonical_name = normalizer.normalize(
+                canonical_name, "location") if canonical_name else canonical_name
 
             if canonical_name not in merged_classes:
                 merged_classes[canonical_name] = ClassDef(
@@ -277,8 +278,10 @@ class CQLLMPipeline:
 
             canonical_domain = alias_map.get(domain, domain)
             canonical_range = alias_map.get(range_, range_)
-            canonical_domain = normalizer.normalize(canonical_domain, "location") if canonical_domain else canonical_domain
-            canonical_range = normalizer.normalize(canonical_range, "location") if canonical_range else canonical_range
+            canonical_domain = normalizer.normalize(
+                canonical_domain, "location") if canonical_domain else canonical_domain
+            canonical_range = normalizer.normalize(
+                canonical_range, "location") if canonical_range else canonical_range
 
             if canonical_domain not in merged_classes or canonical_range not in merged_classes:
                 continue
@@ -299,7 +302,8 @@ class CQLLMPipeline:
         for attr in schema.attributes:
             owner = attr.owner
             canonical_owner = alias_map.get(owner, owner)
-            canonical_owner = normalizer.normalize(canonical_owner, "location") if canonical_owner else canonical_owner
+            canonical_owner = normalizer.normalize(
+                canonical_owner, "location") if canonical_owner else canonical_owner
             if canonical_owner not in merged_classes:
                 continue
             new_attributes.append(
@@ -432,10 +436,13 @@ class CQLLMPipeline:
             existing_rels = base_dict.get("relations", [])
             cand_classes = [s for s in filtered if s.get("type") == "class"]
             cand_rels = [s for s in filtered if s.get("type") == "relation"]
-            class_res = dedup.deduplicate_classes(existing_classes, cand_classes)
+            class_res = dedup.deduplicate_classes(
+                existing_classes, cand_classes)
             rel_res = dedup.deduplicate_relations(existing_rels, cand_rels)
-            print(f"[P4] 去重后保留类 {len(class_res.accepted)} / {len(cand_classes)}，关系 {len(rel_res.accepted)} / {len(cand_rels)}")
-            filtered = class_res.accepted + rel_res.accepted + [s for s in filtered if s.get("type") == "attribute"]
+            print(
+                f"[P4] 去重后保留类 {len(class_res.accepted)} / {len(cand_classes)}，关系 {len(rel_res.accepted)} / {len(cand_rels)}")
+            filtered = class_res.accepted + rel_res.accepted + \
+                [s for s in filtered if s.get("type") == "attribute"]
 
         if not filtered:
             if save_aug_tbox_path:
@@ -459,7 +466,8 @@ class CQLLMPipeline:
         在 TBox 约束下抽取事件与三元组。
         favor_existing_classes=True 时，提示尽量复用已有类；False 时鼓励使用新增细粒度类。
         """
-        schema_json = json.dumps(schema.to_dict(), ensure_ascii=False, indent=2)
+        schema_json = json.dumps(
+            schema.to_dict(), ensure_ascii=False, indent=2)
         if favor_existing_classes:
             class_usage_hint = "优先使用 TBox 中已有的类名，不要随意创造新的事件类型；倾向用已有类 + 属性表达。"
         else:
@@ -523,7 +531,8 @@ class CQLLMPipeline:
         dedup = EmbeddingDeduplicator(threshold=threshold)
         base_dict = schema.to_dict()
         class_res = dedup.deduplicate_classes([], base_dict.get("classes", []))
-        rel_res = dedup.deduplicate_relations([], base_dict.get("relations", []))
+        rel_res = dedup.deduplicate_relations(
+            [], base_dict.get("relations", []))
         return TBoxSchema(
             classes=[ClassDef(**c) for c in class_res.accepted],
             relations=[RelationDef(**r) for r in rel_res.accepted],
@@ -649,6 +658,98 @@ def apply_p4_suggestions(schema: TBoxSchema, p4_result: Dict[str, Any]) -> TBoxS
         attributes=list(attr_map.values()),
     )
     return new_schema
+
+
+def load_segments_with_context(
+    jsonl_path: Path,
+    corpus_root: Path,
+    context_chars: int = 500,
+) -> List[Dict[str, Any]]:
+    """
+    加载过滤后的片段，并补充上下文。
+
+    Args:
+        jsonl_path: light_pool.jsonl 路径
+        corpus_root: 原始语料根目录
+        context_chars: 上下文字符数
+
+    Returns:
+        包含上下文的片段列表
+    """
+    segments = []
+    context_loader = ContextLoader(corpus_root, context_chars)
+
+    # 第一遍：加载所有片段
+    with jsonl_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            seg_data = json.loads(line)
+            segments.append(seg_data)
+
+    # 构建索引
+    # ...（根据需要实现）
+
+    # 第二遍：补充上下文
+    enriched = []
+    for seg in segments:
+        # 如果已有上下文，直接使用
+        if seg.get("context_before") or seg.get("context_after"):
+            enriched.append(seg)
+            continue
+
+        # 否则尝试从文件加载
+        # ...
+        enriched.append(seg)
+
+    return enriched
+
+
+def build_extraction_text(
+    segment: Dict[str, Any],
+    include_context: bool = True,
+    max_total_chars: int = 4000,
+) -> str:
+    """
+    构建用于 P5 抽取的文本。
+
+    Args:
+        segment: 片段数据
+        include_context: 是否包含上下文
+        max_total_chars: 最大总字符数
+
+    Returns:
+        用于抽取的文本
+    """
+    main_text = segment.get("text", "")
+
+    if not include_context:
+        return main_text[:max_total_chars]
+
+    context_before = segment.get("context_before", "")
+    context_after = segment.get("context_after", "")
+
+    # 计算可用空间
+    main_len = len(main_text)
+    remaining = max_total_chars - main_len
+
+    if remaining <= 0:
+        return main_text[:max_total_chars]
+
+    # 分配给前后文
+    half = remaining // 2
+    before_part = context_before[-half:] if context_before else ""
+    after_part = context_after[:half] if context_after else ""
+
+    # 组装
+    parts = []
+    if before_part:
+        parts.append(f"【前文参考】\n{before_part}\n")
+    parts.append(f"【待抽取文本】\n{main_text}\n")
+    if after_part:
+        parts.append(f"【后文参考】\n{after_part}")
+
+    return "\n".join(parts)
 
 
 # =========================

@@ -375,8 +375,22 @@ P5_EXTRACTION_PROMPT = """
 TBox 定义（classes / relations / attributes）：
 {schema_json}
 
-事件 Schema 参考（用于组织输出结构）：
+事件 Schema 参考：
 {event_schema}
+
+---
+
+【重要说明】
+
+输入文本可能包含三个部分：
+1. 【前文参考】：提供上下文背景，帮助理解当前段落
+2. 【待抽取文本】：**主要抽取目标**，请重点从此部分抽取事件和三元组
+3. 【后文参考】：提供后续上下文，帮助补充信息
+
+抽取策略：
+- 事件和三元组应**主要来自【待抽取文本】**部分
+- 前文/后文仅用于辅助理解，帮助确定实体边界、时间范围、因果关系等
+- 如果前文/后文包含与待抽取文本强相关的补充信息（如事件的后续影响），也可以纳入
 
 ---
 
@@ -384,16 +398,23 @@ TBox 定义（classes / relations / attributes）：
 
 类使用提示：{class_usage_hint}
 
-1. 阅读下面的文本，识别其中的 0~N 个灾害事件（如某次洪水或干旱过程），并为每个事件构建一个结构化对象。
+1. 识别【待抽取文本】中的 0~N 个灾害事件（如某次洪水或干旱过程），结合前后文完善事件信息，并为每个事件构建一个结构化对象。
    - event_type 必须使用 TBox.classes.name 中已有的某个类名，例如 "FloodEvent", "DroughtEvent"。
    - 若无法确定具体子类，可以使用更上层的类，如 "DisasterEvent"。
 
 2. 在 TBox 约束下抽取三元组（triples）：
-   - subject 和 object 通常是事件名、地名、致灾因子等实体（用中文字符串表示，与原文风格一致）；
+   - subject 和 object 通常来自【待抽取文本】，是事件名、地名、致灾因子等实体（用中文字符串表示，与原文风格一致）；
    - predicate 必须来自 TBox.relations.name 中已有的某个关系名（如 "has_cause", "affects_region"）；
+   - 可利用前后文补充缺失信息（如年份、地点等）
    - 可以根据需要附带 event_id（若该三元组与某个事件强相关）和 evidence（原文中的支撑句）。
+  
+---
+
+输入文本:
+{input_text}
 
 ---
+
 
 输出格式要求：
 
@@ -635,3 +656,203 @@ EXTRACT_PROMPT_TEMPLATE = """
             ]
         }}
 """
+
+
+# ==============================================================================
+# P5 上下文感知抽取辅助工具
+# ==============================================================================
+
+
+class P5PromptBuilder:
+    """
+    P5 提示词构建器。
+    
+    提供统一的提示词构建和上下文格式化功能。
+    """
+    
+    # 上下文标记
+    MARKER_BEFORE = "【前文参考】"
+    MARKER_MAIN = "【待抽取文本】"
+    MARKER_AFTER = "【后文参考】"
+    
+    @classmethod
+    def format_input_text(
+        cls,
+        main_text: str,
+        context_before: str = "",
+        context_after: str = "",
+    ) -> str:
+        """
+        格式化输入文本（包含上下文标记）。
+        
+        Args:
+            main_text: 主文本（待抽取）
+            context_before: 前文上下文
+            context_after: 后文上下文
+            
+        Returns:
+            格式化后的文本
+        """
+        parts = []
+        
+        if context_before and context_before.strip():
+            parts.append(f"{cls.MARKER_BEFORE}\n{context_before.strip()}")
+        
+        parts.append(f"{cls.MARKER_MAIN}\n{main_text.strip()}")
+        
+        if context_after and context_after.strip():
+            parts.append(f"{cls.MARKER_AFTER}\n{context_after.strip()}")
+        
+        return "\n\n".join(parts)
+    
+    @classmethod
+    def build_class_usage_hint(
+        cls,
+        classes: list,
+        max_classes: int = 10,
+    ) -> str:
+        """
+        构建类使用提示。
+        
+        Args:
+            classes: 类定义列表，每个元素包含 name 和 cn_name
+            max_classes: 最多显示的类数量
+            
+        Returns:
+            类使用提示字符串
+        """
+        if not classes:
+            return "请根据 TBox 中定义的类进行分类。"
+        
+        # 筛选事件类
+        event_classes = [
+            c for c in classes 
+            if "Event" in c.get("name", "") or "事件" in c.get("cn_name", "")
+        ]
+        
+        if not event_classes:
+            event_classes = classes[:max_classes]
+        
+        hints = []
+        for c in event_classes[:max_classes]:
+            name = c.get("name", "")
+            cn_name = c.get("cn_name", "")
+            if name and cn_name:
+                hints.append(f"{name}({cn_name})")
+            elif name:
+                hints.append(name)
+        
+        return f"可用事件类型: {", ".join(hints)}"
+    
+    @classmethod
+    def build_p5_prompt(
+        cls,
+        schema_json: str,
+        input_text: str,
+        context_before: str = "",
+        context_after: str = "",
+        class_usage_hint: str = "",
+        event_schema: str = "",
+    ) -> str:
+        """
+        构建完整的 P5 抽取提示词。
+        
+        Args:
+            schema_json: TBox 定义 JSON
+            input_text: 主文本
+            context_before: 前文上下文
+            context_after: 后文上下文
+            class_usage_hint: 类使用提示
+            event_schema: 事件 Schema 参考
+            
+        Returns:
+            格式化后的提示词
+        """
+        # 格式化输入文本
+        formatted_input = cls.format_input_text(
+            main_text=input_text,
+            context_before=context_before,
+            context_after=context_after,
+        )
+        
+        # 填充模板
+        return P5_EXTRACTION_PROMPT.format(
+            schema_json=schema_json,
+            event_schema=event_schema or EVENT_SCHEMA_HINT,
+            class_usage_hint=class_usage_hint or "请根据 TBox 中定义的类进行分类",
+            input_text=formatted_input,
+        )
+
+
+# 简化的辅助函数（便于直接调用）
+
+def format_extraction_input(
+    main_text: str,
+    context_before: str = "",
+    context_after: str = "",
+) -> str:
+    """
+    格式化 P5 抽取输入文本。
+    
+    将主文本和上下文组装成结构化格式，便于 LLM 理解抽取边界。
+    
+    Args:
+        main_text: 待抽取的主文本
+        context_before: 前文上下文（可选）
+        context_after: 后文上下文（可选）
+        
+    Returns:
+        格式化后的文本
+        
+    Example:
+        >>> text = format_extraction_input(
+        ...     "1998年长江发生特大洪水...",
+        ...     context_before="当年降雨量异常偏多..."
+        ... )
+        >>> print(text)
+        【前文参考】
+        当年降雨量异常偏多...
+        
+        【待抽取文本】
+        1998年长江发生特大洪水...
+    """
+    return P5PromptBuilder.format_input_text(
+        main_text=main_text,
+        context_before=context_before,
+        context_after=context_after,
+    )
+
+
+def build_p5_extraction_prompt(
+    schema_json: str,
+    input_text: str,
+    context_before: str = "",
+    context_after: str = "",
+    classes: list = None,
+) -> str:
+    """
+    构建 P5 抽取提示词。
+    
+    封装常用的提示词构建流程，简化调用。
+    
+    Args:
+        schema_json: TBox 定义 JSON 字符串
+        input_text: 待抽取的主文本
+        context_before: 前文上下文
+        context_after: 后文上下文
+        classes: TBox 中的类定义列表（用于生成提示）
+        
+    Returns:
+        完整的 P5 提示词
+    """
+    class_hint = ""
+    if classes:
+        class_hint = P5PromptBuilder.build_class_usage_hint(classes)
+    
+    return P5PromptBuilder.build_p5_prompt(
+        schema_json=schema_json,
+        input_text=input_text,
+        context_before=context_before,
+        context_after=context_after,
+        class_usage_hint=class_hint,
+    )
