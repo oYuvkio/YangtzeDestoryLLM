@@ -59,18 +59,16 @@ python3 tools/corpus_cleaner.py --input paper.pdf --min-chars 1000 --max-chars 3
 python3 tools/corpus_cleaner.py --input ./docs/ --remove-references --pdf-engine pdfplumber
 
 # 启用 LLM 语义切分（需要配额）
-python3 tools/corpus_cleaner.py --input ./docs/ --llm-split \\
-    --llm-provider zhipu --llm-model "GLM-4.5-Air"
+python3 tools/corpus_cleaner.py --input ./docs/ --llm-split \
 
 # 试运行模式：只显示将要处理的文件
 python3 tools/corpus_cleaner.py --input ./docs/ --dry-run
 配置优先级
 命令行参数 > 环境变量 > 配置文件 (cfg.yaml) > 默认值
 环境变量
-● LLM_PROVIDER: LLM 提供商 (zhipu/openai/gemini)
+● OPENAI_API_KEY: API 密钥（必须在 .env 中配置）
+● LLM_BASE_URL / OPENAI_BASE_URL: API 地址
 ● LLM_MODEL_NAME: 模型名称
-● LLM_API_KEY: API 密钥
-● LLM_BASE_URL: 自定义 API 地址
 ● LLM_TEMPERATURE: 温度参数
 作者: KG Team
 版本: 4.0.0
@@ -181,6 +179,7 @@ def _ensure_llm_imports() -> None:
     1. 避免循环依赖
     2. 加快脚本启动速度（只有实际使用 LLM 功能时才导入）
     3. 在 LLM 模块不可用时仍能运行基础功能
+    4. 配置 llm_core 的日志，使其共享 corpus_cleaner 的文件处理器
     """
     global _LLMFactory, _ExternalRateLimitError, _ExternalAccountBlockedError
 
@@ -188,10 +187,31 @@ def _ensure_llm_imports() -> None:
         return  # 已经导入过
 
     try:
-        from kg.llm_core import LLMFactory, RateLimitError, AccountBlockedError
+        from kg.llm_core import (
+            LLMFactory, RateLimitError, AccountBlockedError,
+            configure_logger as configure_llm_logger
+        )
         _LLMFactory = LLMFactory
         _ExternalRateLimitError = RateLimitError
         _ExternalAccountBlockedError = AccountBlockedError
+        
+        # 配置 llm_core 的日志：
+        # 1. 设置 propagate=True 让日志传播到根 logger
+        # 2. 将当前 logger 的文件处理器复制到 llm_core 的 logger
+        llm_logger = configure_llm_logger(propagate=True)
+        
+        # 复制文件处理器，确保 llm_core 的日志也写入文件
+        for handler in logger.handlers:
+            if isinstance(handler, (logging.FileHandler, RotatingFileHandler, FlushingRotatingFileHandler)):
+                # 检查是否已添加相同的处理器
+                has_same_handler = any(
+                    isinstance(h, type(handler)) and 
+                    getattr(h, 'baseFilename', None) == getattr(handler, 'baseFilename', None)
+                    for h in llm_logger.handlers
+                )
+                if not has_same_handler:
+                    llm_logger.addHandler(handler)
+                    
     except ImportError as e:
         logging.getLogger(__name__).warning(
             f"无法导入 LLM 模块，LLM 相关功能将不可用: {e}"
@@ -295,6 +315,19 @@ class Constants:
 # ==============================================================================
 
 
+class FlushingRotatingFileHandler(RotatingFileHandler):
+    """
+    每次写入都立即刷新的 RotatingFileHandler。
+    
+    解决日志批量缓冲问题，确保每条日志都实时写入文件。
+    """
+    
+    def emit(self, record: logging.LogRecord) -> None:
+        """写入日志记录后立即刷新"""
+        super().emit(record)
+        self.flush()
+
+
 class LoggerFactory:
     """
     日志工厂类。
@@ -304,6 +337,7 @@ class LoggerFactory:
     - 文件输出（可选）
     - 日志级别控制
     - 线程安全
+    - 实时刷新（每条日志立即写入文件）
     """
 
     _lock: ClassVar[threading.Lock] = threading.Lock()
@@ -356,7 +390,7 @@ class LoggerFactory:
                     if not has_file_handler:
                         log_file.parent.mkdir(parents=True, exist_ok=True)
                         file_formatter = cls._create_formatter(use_colors=False)
-                        file_handler = RotatingFileHandler(
+                        file_handler = FlushingRotatingFileHandler(
                             log_file,
                             encoding="utf-8",
                             mode="a",
@@ -383,10 +417,10 @@ class LoggerFactory:
             console_handler.setLevel(level)
             logger.addHandler(console_handler)
 
-            # 文件处理器（可选）
+            # 文件处理器（可选）- 使用实时刷新的处理器
             if log_file:
                 log_file.parent.mkdir(parents=True, exist_ok=True)
-                file_handler = RotatingFileHandler(
+                file_handler = FlushingRotatingFileHandler(
                     log_file,
                     encoding="utf-8",
                     mode="a",
@@ -1378,38 +1412,24 @@ class LLMConfig(BaseConfig):
     LLM 配置。
 
     用于 LLM 语义切分和质量判定。
+    采用 OpenAI 兼容接口，通过 base_url 适配不同服务商。
+    API Key 统一从环境变量 OPENAI_API_KEY 读取。
     """
-    provider: str = "zhipu"
-    model_name: str = "glm-4.5-flash"
-    temperature: float = 0.0
-    max_tokens: int = 4096
-    api_key: Optional[str] = None
-    base_url: Optional[str] = None
-    thinking_type: Optional[str] = None
-
-    # 重试配置
+    base_url: str = ""  # API 地址（必须配置）
+    model_name: str = "gpt-4o-mini"  # 模型名称
+    temperature: float = 0.1
     max_retries: int = 3
-    retry_delay: float = 1.0
     timeout: float = 60.0
 
     def to_factory_dict(self) -> Dict[str, Any]:
-        """
-        转换为 LLMFactory 接受的字典格式。
-
-        过滤掉 None 值和非必要字段。
-        """
-        result = {
-            "provider": self.provider,
+        """转换为 LLMFactory 接受的字典格式。"""
+        return {
+            "base_url": self.base_url,
             "model_name": self.model_name,
             "temperature": self.temperature,
+            "max_retries": self.max_retries,
+            "timeout": int(self.timeout),
         }
-        if self.api_key:
-            result["api_key"] = self.api_key
-        if self.base_url:
-            result["base_url"] = self.base_url
-        if self.thinking_type:
-            result["thinking_type"] = self.thinking_type
-        return result
 
 
 @dataclass
@@ -1456,14 +1476,10 @@ class ConfigLoader:
 
     # 环境变量到配置路径的映射
     ENV_MAPPING: ClassVar[Dict[str, Tuple[str, ...]]] = {
-        "LLM_PROVIDER": ("llm", "provider"),
         "LLM_MODEL_NAME": ("llm", "model_name"),
-        "OPENAI_MODEL_API": ("llm", "model_name"),
         "LLM_TEMPERATURE": ("llm", "temperature"),
-        "LLM_API_KEY": ("llm", "api_key"),
         "LLM_BASE_URL": ("llm", "base_url"),
         "OPENAI_BASE_URL": ("llm", "base_url"),
-        "LLM_THINKING_TYPE": ("llm", "thinking_type"),
         "CORPUS_MIN_CHARS": ("splitter", "min_chars"),
         "CORPUS_MAX_CHARS": ("splitter", "max_chars"),
         "CORPUS_MAX_WORKERS": ("processing", "max_workers"),
@@ -1657,43 +1673,25 @@ class ConfigLoader:
         llm_config = None
         if getattr(args, "llm_split", False):
             llm_config = LLMConfig(
-                provider=self.resolve_value(
-                    getattr(args, "llm_provider", None),
-                    "LLM_PROVIDER",
-                    ("llm", "provider"),
-                    "zhipu",
+                base_url=self.resolve_value(
+                    getattr(args, "llm_base_url", None),
+                    "LLM_BASE_URL",
+                    ("llm", "base_url"),
+                    "",
                 ),
                 model_name=self.resolve_value(
                     getattr(args, "llm_model", None),
                     "LLM_MODEL_NAME",
                     ("llm", "model_name"),
-                    "glm-4.5-flash",
+                    "gpt-4o-mini",
                 ),
                 temperature=float(self.resolve_value(
                     getattr(args, "llm_temperature", None),
                     "LLM_TEMPERATURE",
                     ("llm", "temperature"),
-                    0.0,
+                    0.1,
                     float,
                 )),
-                api_key=self.resolve_value(
-                    getattr(args, "llm_api_key", None),
-                    "LLM_API_KEY",
-                    ("llm", "api_key"),
-                    None,
-                ),
-                base_url=self.resolve_value(
-                    getattr(args, "llm_base_url", None),
-                    "LLM_BASE_URL",
-                    ("llm", "base_url"),
-                    None,
-                ),
-                thinking_type=self.resolve_value(
-                    getattr(args, "llm_thinking", None),
-                    "LLM_THINKING_TYPE",
-                    ("llm", "thinking_type"),
-                    None,
-                ),
             )
 
         # 输出目录
@@ -2812,7 +2810,7 @@ class LLMSemanticSplitter:
                 if self.show_llm_output:
                     print("❌ LLM 模块不可用，请检查 kg/llm_core.py 是否存在")
                 logger.warning(
-                    f"LLM 后端初始化失败: LLM 模块不可用 (provider={self.config.provider}, model={self.config.model_name})"
+                    f"LLM 后端初始化失败: LLM 模块不可用 (model={self.config.model_name})"
                 )
                 return None
 
@@ -2820,15 +2818,15 @@ class LLMSemanticSplitter:
                 self._llm_backend = _LLMFactory.create(
                     self.config.to_factory_dict())
                 if self.show_llm_output:
-                    print(f"✅ LLM 后端初始化成功: {self.config.provider}/{self.config.model_name}")
+                    print(f"✅ LLM 后端初始化成功: {self.config.model_name}")
                 logger.info(
-                    f"LLM 后端初始化成功: provider={self.config.provider}, model={self.config.model_name}"
+                    f"LLM 后端初始化成功: model={self.config.model_name}"
                 )
             except Exception as e:
                 if self.show_llm_output:
                     print(f"❌ LLM 后端初始化失败: {e}")
                 logger.error(
-                    f"LLM 后端初始化失败: provider={self.config.provider}, model={self.config.model_name}, error={e}"
+                    f"LLM 后端初始化失败: model={self.config.model_name}, error={e}"
                 )
 
         return self._llm_backend
@@ -2872,7 +2870,7 @@ class LLMSemanticSplitter:
         if self.llm_backend is None:
             error_msg = (
                 f"LLM 后端不可用，无法进行语义切分 "
-                f"(provider={self.config.provider}, model={self.config.model_name})"
+                f"(model={self.config.model_name})"
             )
             if self.show_llm_output:
                 print(f"❌ {error_msg}")
@@ -3033,28 +3031,22 @@ class LLMSemanticSplitter:
             print(f"\n{'='*60}")
             print(f"🤖 LLM 调用信息{chunk_info}")
             print(f"{'='*60}")
-            print(f"  • 厂商: {self.config.provider}")
             print(f"  • 模型: {self.config.model_name}")
             print(f"  • 温度: {self.config.temperature}")
             print(f"  • 输入长度: {len(text)} 字符")
             print(f"{'='*60}")
             print(f"🔄 正在调用 LLM...")
         
-        # LLM 后端初始化成功，打印 API Key 信息
+        # LLM 后端初始化成功，尝试打印 API Key 信息
         if self.show_llm_output:
-            # 尝试从 llm_backend 获取实际使用的 API Key
             actual_api_key = None
-            if hasattr(self.llm_backend, 'api_key'):
-                actual_api_key = self.llm_backend.api_key
-            elif hasattr(self.llm_backend, 'client') and hasattr(self.llm_backend.client, 'api_key'):
+            if hasattr(self.llm_backend, 'client') and hasattr(self.llm_backend.client, 'api_key'):
                 actual_api_key = self.llm_backend.client.api_key
             
             if actual_api_key:
                 api_key_display = "***" + actual_api_key[-6:] if len(actual_api_key) > 6 else "已配置"
-            elif self.config.api_key:
-                api_key_display = "***" + self.config.api_key[-6:] if len(self.config.api_key) > 6 else "已配置"
             else:
-                api_key_display = "未配置（使用环境变量）"
+                api_key_display = "使用环境变量 OPENAI_API_KEY"
             
             print(f"  • API Key: {api_key_display}")
 
@@ -3064,7 +3056,7 @@ class LLMSemanticSplitter:
         try:
             # 调用 LLM
             logger.info(
-                f"LLM 调用开始 provider={self.config.provider}, model={self.config.model_name}, "
+                f"LLM 调用开始 model={self.config.model_name}, "
                 f"temp={self.config.temperature}, text_len={len(text)}"
             )
             response = self.llm_backend.chat_messages(
@@ -3073,7 +3065,6 @@ class LLMSemanticSplitter:
                     {"role": "user", "content": user_prompt},
                 ],
                 json_mode=True,
-                response_format={"type": "json_object"},
             )
 
             # 打印 LLM 输出（只打印到控制台，不写日志）
@@ -3562,6 +3553,8 @@ class OutputManager:
     def generate_index(self, result: BatchResult) -> Path:
         """
         生成处理结果索引文件。
+        
+        **重要**：会合并之前的索引记录，避免覆盖历史数据。
 
         Args:
             result: 批量处理结果
@@ -3570,39 +3563,83 @@ class OutputManager:
             索引文件路径
         """
         index_path = self.output_dir / "_corpus_index.json"
+        
+        # 加载之前的索引（如果存在）
+        old_success: List[Dict] = []
+        old_skipped: List[Dict] = []
+        old_failed: List[Dict] = []
+        old_total_parts = 0
+        
+        if index_path.exists():
+            try:
+                old_data = json.loads(index_path.read_text(encoding="utf-8"))
+                old_success = old_data.get("success", [])
+                old_skipped = old_data.get("skipped", [])
+                old_failed = old_data.get("failed", [])
+                old_total_parts = old_data.get("summary", {}).get("total_parts", 0)
+                logger.info(f"加载旧索引: {len(old_success)} 成功, {len(old_skipped)} 跳过, {len(old_failed)} 失败")
+            except Exception as e:
+                logger.warning(f"读取旧索引失败，将创建新索引: {e}")
+        
+        # 构建当前成功记录的路径集合（用于去重）
+        current_success_paths = {str(r.path) for r in result.successful_results}
+        current_skipped_paths = {str(r.path) for r in result.skipped_results}
+        current_failed_paths = {str(r.path) for r in result.failed_results}
+        current_all_paths = current_success_paths | current_skipped_paths | current_failed_paths
+        
+        # 合并成功记录（保留旧的，添加新的）
+        merged_success = [
+            item for item in old_success if item.get("path") not in current_all_paths
+        ]
+        merged_success.extend([
+            {
+                "path": str(r.path),
+                "parts_count": r.parts_count,
+                "output_paths": [str(p) for p in r.output_paths],
+            }
+            for r in result.successful_results
+        ])
+        
+        # 合并跳过记录
+        merged_skipped = [
+            item for item in old_skipped if item.get("path") not in current_all_paths
+        ]
+        merged_skipped.extend([
+            {"path": str(r.path), "message": r.message}
+            for r in result.skipped_results
+        ])
+        
+        # 合并失败记录
+        merged_failed = [
+            item for item in old_failed if item.get("path") not in current_all_paths
+        ]
+        merged_failed.extend([
+            {
+                "path": str(r.path),
+                "message": r.message,
+                "error_type": r.error_type,
+            }
+            for r in result.failed_results
+        ])
+        
+        # 计算合并后的总分片数
+        merged_total_parts = sum(item.get("parts_count", 0) for item in merged_success)
 
         index_data = {
             "tool_name": Constants.TOOL_NAME,
             "tool_version": Constants.VERSION,
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "summary": {
-                "total_files": result.total_files,
-                "total_parts": result.total_parts,
-                "success_count": result.success_count,
-                "skipped_count": result.skipped_count,
-                "failed_count": result.failed_count,
+                "total_files": len(merged_success) + len(merged_skipped) + len(merged_failed),
+                "total_parts": merged_total_parts,
+                "success_count": len(merged_success),
+                "skipped_count": len(merged_skipped),
+                "failed_count": len(merged_failed),
                 "duration_seconds": round(result.duration_seconds, 2),
             },
-            "success": [
-                {
-                    "path": str(r.path),
-                    "parts_count": r.parts_count,
-                    "output_paths": [str(p) for p in r.output_paths],
-                }
-                for r in result.successful_results
-            ],
-            "skipped": [
-                {"path": str(r.path), "message": r.message}
-                for r in result.skipped_results
-            ],
-            "failed": [
-                {
-                    "path": str(r.path),
-                    "message": r.message,
-                    "error_type": r.error_type,
-                }
-                for r in result.failed_results
-            ],
+            "success": merged_success,
+            "skipped": merged_skipped,
+            "failed": merged_failed,
         }
 
         index_path.write_text(
@@ -3610,7 +3647,7 @@ class OutputManager:
             encoding="utf-8",
         )
 
-        logger.info(f"索引已保存: {index_path}")
+        logger.info(f"索引已保存: {index_path} (合并后: {len(merged_success)} 成功, {len(merged_skipped)} 跳过, {len(merged_failed)} 失败)")
         return index_path
 
 # ==============================================================================
@@ -4196,8 +4233,7 @@ python3 tools/corpus_cleaner.py --input paper.pdf --min-chars 1000 --max-chars 3
 使用 pdfplumber 引擎，移除参考文献
 python3 tools/corpus_cleaner.py --input ./docs/ --remove-references --pdf-engine pdfplumber
 启用 LLM 语义切分（需要 API 配额）
-python3 tools/corpus_cleaner.py --input ./docs/ --llm-split \\
-    --llm-provider zhipu --llm-model "GLM-4.5-Air"
+python3 tools/corpus_cleaner.py --input ./docs/ --llm-split
 试运行模式
 python3 tools/corpus_cleaner.py --input ./docs/ --dry-run --verbose
 配置优先级
@@ -4205,10 +4241,9 @@ python3 tools/corpus_cleaner.py --input ./docs/ --dry-run --verbose
 命令行参数 > 环境变量 > 配置文件 (cfg.yaml) > 默认值
 环境变量
 
-LLM_PROVIDER      - LLM 提供商 (zhipu/openai/gemini)
+OPENAI_API_KEY    - API Key（必须在 .env 中配置）
 LLM_MODEL_NAME    - 模型名称
-LLM_API_KEY       - API Key
-LLM_BASE_URL      - 自定义 API 地址
+LLM_BASE_URL      - API 地址
 LLM_TEMPERATURE   - 温度参数
         """,
     )
@@ -4284,12 +4319,6 @@ LLM_TEMPERATURE   - 温度参数
         help="启用 LLM 语义切分+筛选（成本更高，需配额）",
     )
     llm_group.add_argument(
-        "--llm-provider",
-        type=str,
-        default=None,
-        help="LLM 提供商 (zhipu/openai/gemini)",
-    )
-    llm_group.add_argument(
         "--llm-model",
         type=str,
         default=None,
@@ -4299,25 +4328,13 @@ LLM_TEMPERATURE   - 温度参数
         "--llm-temperature",
         type=float,
         default=None,
-        help="LLM 温度参数 (默认: 0.0，更稳定)",
-    )
-    llm_group.add_argument(
-        "--llm-api-key",
-        type=str,
-        default=None,
-        help="LLM API Key（推荐使用环境变量 LLM_API_KEY）",
+        help="LLM 温度参数 (默认: 0.1)",
     )
     llm_group.add_argument(
         "--llm-base-url",
         type=str,
         default=None,
-        help="LLM API Base URL（用于自部署接口）",
-    )
-    llm_group.add_argument(
-        "--llm-thinking",
-        choices=["enabled", "disabled"],
-        default=None,
-        help="LLM 深度思考模式（仅 zhipu 有效）",
+        help="LLM API 地址（必须配置，或在 cfg.yaml 中设置）",
     )
 
     # ===== 元数据选项 =====
@@ -4412,7 +4429,7 @@ def print_banner(
   👷 并行线程: {config.max_workers}
 """
     if config.use_llm_split and config.llm:
-        banner += f"  🤖 LLM 切分: ON | {config.llm.provider}/{config.llm.model_name}\n"
+        banner += f"  🤖 LLM 切分: ON | {config.llm.model_name}\n"
     else:
         banner += "  🤖 LLM 切分: OFF\n"
 
@@ -4551,14 +4568,13 @@ def run_cli() -> int:
             if not llm_splitter.validate_backend():
                 error_msg = (
                     f"\n❌ LLM 后端初始化失败\n"
-                    f"   厂商: {config.llm.provider}\n"
                     f"   模型: {config.llm.model_name}\n\n"
                     f"您启用了 --llm-split 参数，要求使用 LLM 进行语义切分。\n"
                     f"但 LLM 后端不可用，无法继续执行。\n\n"
                     f"请检查：\n"
                     f"  1. kg/llm_core.py 模块是否存在\n"
-                    f"  2. API Key 是否正确配置\n"
-                    f"  3. 环境变量 ZHIPUAI_API_KEY / OPENAI_API_KEY 是否设置\n\n"
+                    f"  2. .env 中 OPENAI_API_KEY 是否正确配置\n"
+                    f"  3. cfg.yaml 中 llm.base_url 是否正确配置\n\n"
                     f"如果想使用规则切分，请移除 --llm-split 参数\n"
                 )
                 print(error_msg)
@@ -4856,6 +4872,20 @@ def save_segments_jsonl(segments: List[Segment], output_path: Path) -> None:
 
 # ==============================================================================
 # 主入口
+# ==============================================================================
+
+
+def main() -> int:
+    """
+    主入口函数。
+    Returns:
+        退出码
+    """
+    return run_cli()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 # ==============================================================================
 
 

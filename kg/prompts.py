@@ -742,7 +742,7 @@ class P5PromptBuilder:
             elif name:
                 hints.append(name)
         
-        return f"可用事件类型: {", ".join(hints)}"
+        return f"可用事件类型: {', '.join(hints)}"
     
     @classmethod
     def build_p5_prompt(

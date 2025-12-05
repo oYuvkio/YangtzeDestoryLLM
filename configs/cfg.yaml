@@ -19,40 +19,27 @@ paths:
   eval_pool_dir: "data/p5_eval_pool"                # Eval Pool 输出目录（pool/dev/test）；tools/build_eval_pool.py 使用。
 
 llm:
-  provider: "zhipu"                      # 默认 LLM 厂商（全局兜底）；被 run_cq_pipeline.py / p4_enhance_onto.py / p5_from_tbox.py / filter_corpus_light.py / build_eval_pool.py 等读取。
-  model_name: "glm-4.5-air"              # 默认模型名称（全局兜底）；同上。
-  temperature: 0.1                       # 默认温度，保持 JSON 稳定输出；同上。
-  thinking_type: "disabled"              # 仅 zhipu 支持的思考模式；同上。
-  # base_url: ""                        # 可选：自建/代理的 OpenAI 兼容地址（不包含 key），如无则留空
-  # ⚠️ API Key 请放 .env（如 OPENAI_API_KEY/ZHIPU_API_KEY/GEMINI_API_KEY），不要写入 cfg
+  # OpenAI 兼容接口配置（API Key 放 .env）
+  # 注：LongCat 的 OpenAI 兼容端点是 /openai/v1，代码会自动补全
+  base_url: "https://api.longcat.chat/openai/v1"   # API 地址（已补全路径）
+  model_name: "LongCat-Flash-Chat"               # 模型名称
+  temperature: 0.1                        # 温度参数
+  max_retries: 3                          # 重试次数
+  timeout: 60                             # 超时时间（秒）
+  max_tokens: 8192                        # LongCat 默认需要指定
 
-# 分阶段 LLM 配置（可选）：如果填写，则 P1–P5 优先使用对应配置；再回退到 llm 块，再回退到 CLI 默认
+# 分阶段 LLM 配置（可选，不配置则使用上面的默认配置）
 llm_per_stage:
   p1:
-    provider: "zhipu"                   # P1 生成/收集 CQ：run_cq_pipeline.py
-    model_name: "glm-4.5-air"
-    temperature: 0.1
-    # base_url: ""                      # 可选：阶段专用 base_url（不含 key）
+    model_name: "gpt-4o-mini"
   p2:
-    provider: "openai"                   # P2 CQ→初始 TBox：run_cq_pipeline.py
-    model_name: "glm-4.5-air"
-    temperature: 0.1
-    # base_url: ""
+    model_name: "gpt-4o-mini"
   p3:
-    provider: "zhipu"                    # P3 规范化/层次补充：run_cq_pipeline.py
-    model_name: "glm-4.5-air"
-    temperature: 0.1
-    # base_url: ""
+    model_name: "gpt-4o-mini"
   p4:
-    provider: "zhipu"                    # P4 文献增强建议：p4_enhance_onto.py / run_cq_pipeline.py (如触发)
-    model_name: "glm-4.5-air"
-    temperature: 0.1
-    # base_url: ""
+    model_name: "gpt-4o-mini"
   p5:
-    provider: "openai"                   # P5 抽取：p5_from_tbox.py / run_cq_pipeline.py (如触发)
-    model_name: "glm-4.5-air"
-    temperature: 0.1
-    # base_url: ""
+    model_name: "gpt-4o-mini"
 
 embedding:
   model_name: "BAAI/bge-base-zh-v1.5"    # 句向量模型，用于去重与 CQ 覆盖度；被 tools/deduplication.py、tools/cq_coverage.py 使用。
