@@ -288,8 +288,9 @@ class Constants:
     DEFAULT_MAX_WORKERS: Final[int] = 4
 
     # 缓存
-    DEFAULT_CACHE_SAVE_INTERVAL: Final[int] = 10  # 每处理 10 个文件自动保存
+    DEFAULT_CACHE_SAVE_INTERVAL: Final[int] = 1  # 每处理 1 个文件立即保存（确保断点续跑）
     CACHE_FILE_NAME: Final[str] = ".corpus_cleaner_cache.jsonl"
+    CHUNK_CACHE_DIR_NAME: Final[str] = ".chunk_cache"  # 块级缓存目录
 
     # 重试机制
     DEFAULT_MAX_RETRIES: Final[int] = 3
@@ -956,34 +957,38 @@ class ProcessingCache:
     
     功能：
     1. **断点续运行**：记录已处理的文件，重启后跳过
-    2. **进度持久化**：定期保存到磁盘，防止数据丢失
-    3. **状态查询**：快速检查文件是否已处理
-    4. **错误跟踪**：记录失败文件，支持重试
+    2. **片段级缓存**：记录已写入的片段，支持大文件切分中断后继续
+    3. **进度持久化**：定期保存到磁盘，防止数据丢失
+    4. **状态查询**：快速检查文件是否已处理
+    5. **错误跟踪**：记录失败文件，支持重试
     
     缓存格式（JSONL）：
     ```json
-    {"path": "file.pdf", "status": "success", "parts": 5, "timestamp": "2024-01-01 10:00:00"}
-    {"path": "file2.pdf", "status": "failed", "error": "...", "timestamp": "..."}
+    {"path": "file.pdf", "status": "success", "parts": 5, "output_paths": [...], "timestamp": "..."}
+    {"path": "file2.pdf", "status": "partial", "parts": 3, "output_paths": [...], "timestamp": "..."}
+    {"path": "file3.pdf", "status": "failed", "error": "...", "timestamp": "..."}
     ```
     
     使用示例：
     ```python
     cache = ProcessingCache(output_dir / ".cache.jsonl")
     
-    # 检查文件是否已处理
+    # 检查文件是否已完成
     if cache.is_processed(file_path, status="success"):
-        print("already processed, skip")
-        return
+        return  # 跳过
     
-    # 处理文件...
-    try:
-        result = process_file(file_path)
-        cache.mark_processed(file_path, "success", parts=10)
-    except Exception as e:
-        cache.mark_processed(file_path, "failed", error=str(e))
+    # 检查是否部分完成
+    completed = cache.get_completed_output_paths(file_path)
+    if completed:
+        print(f"继续从第 {len(completed)+1} 个片段开始")
     
-    # 定期保存
-    cache.save()
+    # 增量记录每个写入的片段
+    for i, part in enumerate(parts):
+        write_part(part)
+        cache.add_completed_part(file_path, output_path)
+    
+    # 标记完成
+    cache.mark_processed(file_path, "success", parts=len(parts))
     ```
     
     设计特点：
@@ -1008,7 +1013,7 @@ class ProcessingCache:
         self.cache_path = cache_path
         self.auto_save_interval = auto_save_interval
         
-        # 缓存数据：path -> {status, parts, error, timestamp}
+        # 缓存数据：path -> {status, parts, output_paths, error, timestamp}
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._dirty = False  # 标记是否有未保存的更改
@@ -1049,6 +1054,7 @@ class ProcessingCache:
                         self._cache[path] = {
                             "status": entry.get("status", "unknown"),
                             "parts": entry.get("parts", 0),
+                            "output_paths": entry.get("output_paths", []),  # 新增：已完成的输出路径
                             "error": entry.get("error", ""),
                             "timestamp": entry.get("timestamp", ""),
                         }
@@ -1159,15 +1165,17 @@ class ProcessingCache:
         status: str,
         parts: int = 0,
         error: str = "",
+        output_paths: Optional[List[str]] = None,
     ) -> None:
         """
         标记文件为已处理。
         
         Args:
             file_path: 文件路径
-            status: 处理状态 ("success", "failed", "skipped")
+            status: 处理状态 ("success", "failed", "skipped", "partial")
             parts: 生成的片段数
             error: 错误信息（如果失败）
+            output_paths: 已写入的输出文件路径列表
         """
         path_str = str(file_path)
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1176,6 +1184,7 @@ class ProcessingCache:
             self._cache[path_str] = {
                 "status": status,
                 "parts": parts,
+                "output_paths": output_paths or [],
                 "error": error,
                 "timestamp": timestamp,
             }
@@ -1186,6 +1195,91 @@ class ProcessingCache:
             if self._operation_count >= self.auto_save_interval:
                 self.save()
                 self._operation_count = 0
+    
+    def add_completed_part(
+        self,
+        file_path: Union[Path, str],
+        output_path: Union[Path, str],
+        auto_save: bool = True,
+    ) -> None:
+        """
+        增量记录已完成的片段。
+        
+        用于支持片段级断点续跑：每写入一个片段就记录，
+        崩溃后可以从上次的片段继续。
+        
+        Args:
+            file_path: 源文件路径
+            output_path: 已写入的输出文件路径
+            auto_save: 是否自动保存（默认为 True，确保崩溃后不丢失）
+        """
+        path_str = str(file_path)
+        output_str = str(output_path)
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        with self._lock:
+            if path_str not in self._cache:
+                self._cache[path_str] = {
+                    "status": "partial",  # 部分完成状态
+                    "parts": 0,
+                    "output_paths": [],
+                    "error": "",
+                    "timestamp": timestamp,
+                }
+            
+            # 添加输出路径（去重）
+            if output_str not in self._cache[path_str]["output_paths"]:
+                self._cache[path_str]["output_paths"].append(output_str)
+                self._cache[path_str]["parts"] = len(self._cache[path_str]["output_paths"])
+                self._cache[path_str]["timestamp"] = timestamp
+                self._dirty = True
+            
+            # 每个片段都刷新到磁盘，确保崩溃后不丢失
+            if auto_save:
+                self._operation_count += 1
+                if self._operation_count >= self.auto_save_interval:
+                    self.save()
+                    self._operation_count = 0
+    
+    def get_completed_output_paths(
+        self,
+        file_path: Union[Path, str],
+    ) -> List[str]:
+        """
+        获取已完成的输出文件路径列表。
+        
+        Args:
+            file_path: 源文件路径
+            
+        Returns:
+            已完成的输出路径列表，空列表表示未处理过
+        """
+        path_str = str(file_path)
+        with self._lock:
+            if path_str not in self._cache:
+                return []
+            return self._cache[path_str].get("output_paths", []).copy()
+    
+    def is_partially_processed(self, file_path: Union[Path, str]) -> bool:
+        """
+        检查文件是否部分完成（已有输出但未标记为 success）。
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            是否部分完成
+        """
+        path_str = str(file_path)
+        with self._lock:
+            if path_str not in self._cache:
+                return False
+            entry = self._cache[path_str]
+            # 有输出但状态不是 success
+            return (
+                entry.get("status") in ("partial", "failed") and
+                len(entry.get("output_paths", [])) > 0
+            )
     
     def get_stats(self) -> Dict[str, Any]:
         """
@@ -1199,12 +1293,14 @@ class ProcessingCache:
             success = sum(1 for v in self._cache.values() if v["status"] == "success")
             failed = sum(1 for v in self._cache.values() if v["status"] == "failed")
             skipped = sum(1 for v in self._cache.values() if v["status"] == "skipped")
+            partial = sum(1 for v in self._cache.values() if v["status"] == "partial")
             
             return {
                 "total": total,
                 "success": success,
                 "failed": failed,
                 "skipped": skipped,
+                "partial": partial,
                 "cache_path": str(self.cache_path),
             }
     
@@ -2747,14 +2843,16 @@ class LLMSemanticSplitter:
     - 语义边界切分：在主题转换处切分，而非硬性字符数
     - 质量筛选：识别并过滤与目标领域无关的内容
     - 错误恢复：LLM 调用失败时自动回退到规则切分
+    - 块级缓存：大文件分块处理时支持增量保存，防止中断丢失进度
 
     设计特点：
     - 延迟初始化：只在首次使用时创建 LLM 客户端
     - 优雅降级：出错时回退到规则切分
     - 结构化输出：使用 JSON 格式确保输出可解析
+    - 增量保存：每块处理完成后立即保存到缓存
     """
     # 系统提示词
-    SYSTEM_PROMPT: ClassVar[str] = """你是一名专业的中文语料处理助手，专门负责"长江流域水旱灾害知识图谱"项目的语料切分和筛选工作。
+    SYSTEM_PROMPT: ClassVar[str] = """你是一名专业的中文语料处理助手，专门负责“长江流域水旱灾害知识图谱”项目的语料切分和筛选工作。
 你的任务是：
 1. 将长文本按语义边界切分成多个子段落
 2. 判断每个子段落是否与水旱灾害领域相关
@@ -2772,6 +2870,7 @@ class LLMSemanticSplitter:
         max_chars: int = Constants.DEFAULT_MAX_CHARS,
         fallback_splitter: Optional[SmartSplitter] = None,
         show_llm_output: bool = False,
+        chunk_cache_dir: Optional[Path] = None,
     ):
         """
         初始化 LLM 语义切分器。
@@ -2782,6 +2881,7 @@ class LLMSemanticSplitter:
             max_chars: 子段落最大字符数
             fallback_splitter: 失败时的回退切分器
             show_llm_output: 是否打印 LLM 调用信息（控制台，不写日志）
+            chunk_cache_dir: 块级缓存目录（用于大文件分块处理时的增量保存）
         """
         self.config = config
         self.min_chars = min_chars
@@ -2790,6 +2890,7 @@ class LLMSemanticSplitter:
             SplitterConfig(min_chars=min_chars, max_chars=max_chars)
         )
         self.show_llm_output = show_llm_output
+        self.chunk_cache_dir = chunk_cache_dir
 
         # LLM 后端（延迟初始化）
         self._llm_backend = None
@@ -2930,9 +3031,102 @@ class LLMSemanticSplitter:
         
         return [c for c in chunks if c]  # 过滤空块
 
+    def _get_chunk_cache_path(self, text: str) -> Optional[Path]:
+        """
+        获取块级缓存文件路径。
+        
+        基于文本内容的 MD5 哈希生成唯一的缓存文件名。
+        
+        Args:
+            text: 原始文本
+            
+        Returns:
+            缓存文件路径，如果未配置缓存目录则返回 None
+        """
+        if self.chunk_cache_dir is None:
+            return None
+        
+        # 使用文本内容的 MD5 作为缓存 key
+        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()[:16]
+        cache_file = self.chunk_cache_dir / f"chunks_{text_hash}.json"
+        return cache_file
+    
+    def _load_chunk_cache(self, cache_path: Path) -> Dict[int, List[str]]:
+        """
+        加载块级缓存。
+        
+        Args:
+            cache_path: 缓存文件路径
+            
+        Returns:
+            已处理块的结果字典 {块索引: 段落列表}
+        """
+        if not cache_path.exists():
+            return {}
+        
+        try:
+            data = json.loads(cache_path.read_text(encoding='utf-8'))
+            # 将字符串 key 转为整数
+            return {int(k): v for k, v in data.get('chunks', {}).items()}
+        except Exception as e:
+            logger.warning(f"加载块级缓存失败: {e}")
+            return {}
+    
+    def _save_chunk_cache(
+        self, 
+        cache_path: Path, 
+        chunk_results: Dict[int, List[str]],
+        total_chunks: int,
+        text_length: int,
+    ) -> None:
+        """
+        保存块级缓存。
+        
+        Args:
+            cache_path: 缓存文件路径
+            chunk_results: 块处理结果 {块索引: 段落列表}
+            total_chunks: 总块数
+            text_length: 原文本长度
+        """
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                'total_chunks': total_chunks,
+                'text_length': text_length,
+                'completed_count': len(chunk_results),
+                'chunks': {str(k): v for k, v in chunk_results.items()},
+                'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            }
+            # 原子写入
+            temp_path = cache_path.with_suffix('.tmp')
+            temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+            temp_path.replace(cache_path)
+            logger.debug(f"块级缓存已保存: {len(chunk_results)}/{total_chunks} 块")
+        except Exception as e:
+            logger.warning(f"保存块级缓存失败: {e}")
+    
+    def _clear_chunk_cache(self, cache_path: Path) -> None:
+        """
+        清理块级缓存（处理完成后）。
+        
+        Args:
+            cache_path: 缓存文件路径
+        """
+        try:
+            if cache_path.exists():
+                cache_path.unlink()
+                logger.debug(f"已清理块级缓存: {cache_path.name}")
+        except Exception as e:
+            logger.warning(f"清理块级缓存失败: {e}")
+
     def _split_long_text(self, text: str) -> List[str]:
         """
         分块处理长文本，确保所有内容都经过 LLM。
+        
+        **增量保存特性**：
+        - 每个块处理完成后立即保存到缓存
+        - 中断后可以从上次处理的位置继续
+        - 处理完成后自动清理缓存
         
         Args:
             text: 过长的文本
@@ -2947,26 +3141,61 @@ class LLMSemanticSplitter:
             print(f"\n📄 文本过长 ({len(text)} 字符)，分成 {total_chunks} 块处理")
         logger.info(f"文本过长 ({len(text)} 字符)，分成 {total_chunks} 块处理")
         
-        all_segments: List[str] = []
+        # 块级缓存支持
+        cache_path = self._get_chunk_cache_path(text)
+        chunk_results: Dict[int, List[str]] = {}
+        
+        # 尝试加载已有缓存
+        if cache_path:
+            chunk_results = self._load_chunk_cache(cache_path)
+            if chunk_results:
+                logger.info(f"从缓存恢复: 已完成 {len(chunk_results)}/{total_chunks} 块")
+                if self.show_llm_output:
+                    print(f"📦 从缓存恢复: 已完成 {len(chunk_results)}/{total_chunks} 块")
         
         for i, chunk in enumerate(chunks):
+            # 跳过已缓存的块
+            if i in chunk_results:
+                if self.show_llm_output:
+                    print(f"⏭️ 跳过已处理的第 {i+1}/{total_chunks} 块")
+                logger.debug(f"跳过已缓存的块 {i+1}/{total_chunks}")
+                continue
+            
             if self.show_llm_output:
                 print(f"\n🔄 处理第 {i+1}/{total_chunks} 块 ({len(chunk)} 字符)")
             logger.info(f"处理第 {i+1}/{total_chunks} 块 ({len(chunk)} 字符)")
             
             try:
                 segments = self._process_single_chunk(chunk, chunk_index=i, total_chunks=total_chunks)
-                all_segments.extend(segments)
+                chunk_results[i] = segments
+                
+                # 立即保存块级缓存
+                if cache_path:
+                    self._save_chunk_cache(cache_path, chunk_results, total_chunks, len(text))
+                    
             except (_InternalRateLimitError, _InternalAccountBlockedError):
-                # 严重错误直接向上抛出
+                # 严重错误：先保存缓存，再向上抛出
+                if cache_path:
+                    self._save_chunk_cache(cache_path, chunk_results, total_chunks, len(text))
+                    logger.info(f"已保存块级进度: {len(chunk_results)}/{total_chunks} 块")
                 raise
             except Exception as e:
                 logger.warning(f"第 {i+1} 块处理失败: {e}")
                 # 其他错误继续处理下一块
                 continue
         
+        # 合并所有块的结果
+        all_segments: List[str] = []
+        for i in range(total_chunks):
+            if i in chunk_results:
+                all_segments.extend(chunk_results[i])
+        
         # 去重（因为分块有重叠，可能有重复结果）
         unique_segments = self._deduplicate_segments(all_segments)
+        
+        # 处理完成后清理缓存
+        if cache_path:
+            self._clear_chunk_cache(cache_path)
         
         if self.show_llm_output:
             print(f"\n✅ 分块处理完成: 共 {len(unique_segments)} 个有效段落")
@@ -3402,6 +3631,7 @@ class OutputManager:
     - 去重机制：基于 MD5 哈希避免重复输出
     - 元数据：每个分片附带 .meta.json 文件
     - 索引生成：批量处理后生成完整索引
+    - **断点续跑**：支持跳过已存在的片段文件
     """
 
     def __init__(
@@ -3465,6 +3695,8 @@ class OutputManager:
         source_file: str,
         rel_dir: Optional[Path] = None,
         meta_extra: Optional[Dict[str, str]] = None,
+        skip_existing: bool = False,
+        on_part_written: Optional[Callable[[Path, int, int], None]] = None,
     ) -> List[Tuple[Path, DocumentMeta]]:
         """
         写入切分后的文本片段。
@@ -3474,9 +3706,11 @@ class OutputManager:
             source_file: 原始文件名
             rel_dir: 相对目录路径（用于保留结构）
             meta_extra: 额外元数据
+            skip_existing: 是否跳过已存在的文件（用于断点续跑）
+            on_part_written: 每写入一个片段后的回调函数 (path, current_idx, total)
 
         Returns:
-            (输出路径, 元数据) 的列表
+            (输出路径, 元数据) 的列表（包含新写入和已存在的）
         """
         # 确定目标目录
         target_dir = self.output_dir
@@ -3539,14 +3773,28 @@ class OutputManager:
 
             # 写入文本文件
             text_path = target_dir / f"{name_base}.txt"
+            meta_path = target_dir / f"{name_base}.meta.json"
+            
+            # 检查是否已存在（断点续跑支持）
+            if skip_existing and text_path.exists() and meta_path.exists():
+                logger.debug(f"跳过已存在片段: {text_path.name}")
+                written.append((text_path, meta))
+                continue
+            
             text_path.write_text(chunk, encoding="utf-8")
 
             # 写入元数据文件
-            meta_path = target_dir / f"{name_base}.meta.json"
             meta_path.write_text(meta.to_json(), encoding="utf-8")
 
             written.append((text_path, meta))
             logger.debug(f"写入: {text_path.name} ({len(chunk)} 字符)")
+            
+            # 回调通知（用于增量记录缓存）
+            if on_part_written:
+                try:
+                    on_part_written(text_path, idx, total)
+                except Exception as e:
+                    logger.warning(f"片段写入回调失败: {e}")
 
         return written
 
@@ -3666,7 +3914,7 @@ class FileProcessor:
     3. 有效性检查
     4. 元数据提取
     5. 文本切分
-    6. 结果输出
+    6. 结果输出（支持断点续跑）
     """
 
     def __init__(
@@ -3678,6 +3926,8 @@ class FileProcessor:
         meta_extractor: Optional[MetadataExtractor] = None,
         output_manager: Optional[OutputManager] = None,
         use_llm_split: bool = False,
+        cache: Optional[ProcessingCache] = None,
+        enable_incremental: bool = True,
     ):
         """
         初始化文件处理器。
@@ -3690,6 +3940,8 @@ class FileProcessor:
             meta_extractor: 元数据提取器
             output_manager: 输出管理器
             use_llm_split: 是否优先使用 LLM 切分
+            cache: 处理缓存（用于片段级断点续跑）
+            enable_incremental: 是否启用增量处理（跳过已存在片段）
         """
         self.extractor_factory = extractor_factory
         self.cleaner = cleaner
@@ -3698,6 +3950,8 @@ class FileProcessor:
         self.meta_extractor = meta_extractor or MetadataExtractor()
         self.output_manager = output_manager
         self.use_llm_split = use_llm_split
+        self.cache = cache
+        self.enable_incremental = enable_incremental
 
     def process(
         self,
@@ -3753,16 +4007,25 @@ class FileProcessor:
                     processing_time_seconds=time.time() - start_time,
                 )
 
-            # 6. 输出
+            # 6. 输出（支持片段级断点续跑）
             output_paths: List[Path] = []
             meta_list: List[DocumentMeta] = []
 
             if self.output_manager:
+                # 创建片段写入回调（用于增量记录缓存）
+                def on_part_written(out_path: Path, idx: int, total: int) -> None:
+                    if self.cache:
+                        # 每写入一个片段就记录到缓存
+                        self.cache.add_completed_part(path, out_path)
+                        logger.debug(f"片段 {idx}/{total} 已记录到缓存")
+                
                 written = self.output_manager.write_parts(
                     parts,
                     str(path.name),
                     rel_dir=rel_dir,
                     meta_extra=meta,
+                    skip_existing=self.enable_incremental,
+                    on_part_written=on_part_written if self.cache else None,
                 )
                 output_paths = [w[0] for w in written]
                 meta_list = [w[1] for w in written]
@@ -3982,15 +4245,20 @@ class BatchProcessor:
                 self.progress_callback(i + 1, len(files), path.name)
             
             # 检查缓存：跳过已成功处理的文件
+            # 注意：partial 状态的文件应该继续处理（断点续跑）
             if self.cache and self.skip_processed:
                 if self.cache.is_processed(path, status="success"):
-                    logger.debug(f"跳过已处理的文件: {path.name}")
+                    logger.debug(f"跳过已成功处理的文件: {path.name}")
                     result.add_result(ProcessingResult(
                         path=path,
                         status=ProcessingStatus.SKIPPED,
-                        message="已在缓存中，跳过",
+                        message="已在缓存中(success)，跳过",
                     ))
                     continue
+                elif self.cache.is_partially_processed(path):
+                    # 部分完成的文件，继续处理（断点续跑）
+                    completed = self.cache.get_completed_output_paths(path)
+                    logger.info(f"继续处理部分完成的文件: {path.name} (已有 {len(completed)} 个片段)")
 
             try:
                 rel_dir = self._get_relative_dir(path, root)
@@ -3998,11 +4266,13 @@ class BatchProcessor:
                 result.add_result(proc_result)
                 self._log_result(proc_result)
                 
-                # 更新缓存
+                # 更新缓存（包含 output_paths 用于断点续跑）
                 if self.cache:
                     if proc_result.status == ProcessingStatus.SUCCESS:
                         self.cache.mark_processed(
-                            path, "success", parts=proc_result.parts_count
+                            path, "success", 
+                            parts=proc_result.parts_count,
+                            output_paths=[str(p) for p in proc_result.output_paths],
                         )
                     elif proc_result.status == ProcessingStatus.FAILED:
                         self.cache.mark_processed(
@@ -4079,17 +4349,22 @@ class BatchProcessor:
         - 缓存更新是线程安全的（ProcessingCache 内部有锁）
         """
         # 预先过滤已处理的文件
+        # 注意：partial 状态的文件应该继续处理（断点续跑）
         files_to_process: List[Path] = []
         for path in files:
             if self.cache and self.skip_processed:
                 if self.cache.is_processed(path, status="success"):
-                    logger.debug(f"跳过已处理的文件: {path.name}")
+                    logger.debug(f"跳过已成功处理的文件: {path.name}")
                     result.add_result(ProcessingResult(
                         path=path,
                         status=ProcessingStatus.SKIPPED,
-                        message="已在缓存中，跳过",
+                        message="已在缓存中(success)，跳过",
                     ))
                     continue
+                elif self.cache.is_partially_processed(path):
+                    # 部分完成的文件，继续处理（断点续跑）
+                    completed = self.cache.get_completed_output_paths(path)
+                    logger.info(f"继续处理部分完成的文件: {path.name} (已有 {len(completed)} 个片段)")
             files_to_process.append(path)
         
         if not files_to_process:
@@ -4126,11 +4401,13 @@ class BatchProcessor:
                     result.add_result(proc_result)
                     self._log_result(proc_result)
                     
-                    # 更新缓存（线程安全）
+                    # 更新缓存（线程安全，包含 output_paths 用于断点续跑）
                     if self.cache:
                         if proc_result.status == ProcessingStatus.SUCCESS:
                             self.cache.mark_processed(
-                                path, "success", parts=proc_result.parts_count
+                                path, "success", 
+                                parts=proc_result.parts_count,
+                                output_paths=[str(p) for p in proc_result.output_paths],
                             )
                         elif proc_result.status == ProcessingStatus.FAILED:
                             self.cache.mark_processed(
@@ -4560,6 +4837,7 @@ def run_cli() -> int:
                 max_chars=config.splitter.max_chars,
                 fallback_splitter=splitter,
                 show_llm_output=show_llm_output,
+                chunk_cache_dir=output_dir / Constants.CHUNK_CACHE_DIR_NAME,  # 块级缓存目录
             )
             
             # 启用 LLM 切分时，立即验证后端是否可用
@@ -4600,6 +4878,8 @@ def run_cli() -> int:
             meta_extractor=meta_extractor,
             output_manager=output_manager,
             use_llm_split=config.use_llm_split,
+            cache=cache,  # 传入缓存支持片段级断点续跑
+            enable_incremental=True,  # 启用增量处理
         )
 
         # 创建进度回调
