@@ -19,8 +19,10 @@ from typing import Optional
 # =============================================================================
 # 配置
 # =============================================================================
-DEFAULT_BASE_URL = "https://api.longcat.chat/openai/v1"
-DEFAULT_MODEL = "LongCat-Flash-Chat"
+# 【直接修改这里来配置 API Key、URL 和模型】
+API_KEY = "sk-lkcpmipopqwkzjnckppepdozrxreabkqvoqemsaxyqsoalhe"  # 直接在这里填入你的 API Key
+DEFAULT_BASE_URL = "https://api.siliconflow.cn/v1"  # 修改这里来测试不同的 URL
+DEFAULT_MODEL = "zai-org/GLM-4.5-Air"  # 修改这里来测试不同的模型
 TEST_PROMPT = "你好！请用一句话介绍自己。"
 
 
@@ -279,12 +281,16 @@ def main():
     args = parser.parse_args()
     
     # 检查 API Key
+    # 优先使用命令行参数，其次使用环境变量，最后使用文件中的默认配置
     if not args.api_key:
-        print("❌ 未提供 API Key")
+        args.api_key = API_KEY
+    
+    if not args.api_key or args.api_key.startswith("sk-your"):
+        print("❌ 未提供有效的 API Key")
         print("请通过以下方式之一提供：")
-        print("  1. 命令行参数: --api-key YOUR_KEY")
-        print("  2. 环境变量: export OPENAI_API_KEY=YOUR_KEY")
-        print("  3. .env 文件: OPENAI_API_KEY=YOUR_KEY")
+        print("  1. 直接修改文件: API_KEY = \"你的API Key\"（第 23 行）")
+        print("  2. 命令行参数: python tests/test_api.py --api-key YOUR_KEY")
+        print("  3. 环境变量: export OPENAI_API_KEY=YOUR_KEY")
         sys.exit(1)
     
     print("\n" + "="*60)

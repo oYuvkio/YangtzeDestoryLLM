@@ -196,7 +196,7 @@ def main():
                         help="去重相似度阈值，默认读 cfg.p4.dedup_threshold 或 0.8")
     args = parser.parse_args()
 
-    cfg = {}
+    cfg: Dict[str, any] = {}
     if args.cfg:
         cfg_path = Path(args.cfg)
         if cfg_path.exists():
@@ -220,17 +220,21 @@ def main():
     final_dir.mkdir(parents=True, exist_ok=True)
     process_dir.mkdir(parents=True, exist_ok=True)
 
-    base_path = Path(pick(args.base_tbox, cfg_paths.get("output_dir"), "outputs/cq_pipeline/final") + "/p3_tbox_normalized.json") if args.base_tbox is None else Path(args.base_tbox)
+    base_dir = pick(args.base_tbox, cfg_paths.get("output_dir"), "outputs/cq_pipeline/final")
+    base_path = Path(base_dir) if args.base_tbox else Path(base_dir) / "p3_tbox_normalized.json"
     if not base_path.exists():
         print(f"未找到基线 TBox：{base_path}，请先完成 P1-P3。")
         return
     base = build_tbox(base_path)
 
     pipeline = CQLLMPipeline()
-    if hasattr(pipeline, "llm_config"):
-        cfg_llm = pipeline.llm_config
-    print(f"[LLM][P4] provider={cfg_llm.get('provider')}, model={cfg_llm.get('model_name')}, temperature={cfg_llm.get('temperature')}")
-    corpus_dir = Path(args.corpus_dir)
+    cfg_llm = pipeline.llm_config if hasattr(pipeline, "llm_config") else {}
+    if cfg_llm:
+        print(f"[LLM][P4] provider={cfg_llm.get('provider')}, model={cfg_llm.get('model_name')}, temperature={cfg_llm.get('temperature')}")
+    corpus_dir = Path(pick(args.corpus_dir, cfg_paths.get("p4_corpus_dir"), "data/enhancing_onto_corpus_docs"))
+    if not corpus_dir.exists():
+        print(f"未找到语料目录：{corpus_dir}")
+        return
     agg_path = Path(args.agg_file) if args.agg_file else process_dir / "p4_corpus_suggestions_agg.json"
 
     aggregated: List[Dict] = []

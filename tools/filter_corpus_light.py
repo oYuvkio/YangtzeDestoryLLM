@@ -119,6 +119,21 @@ except ImportError:
     EVAL_SEGMENT_FILTER_SYSTEM = ""
     EVAL_SEGMENT_FILTER_USER_TEMPLATE = ""
 
+# 导入标题标记清理函数
+try:
+    from tools.corpus_cleaner import clean_special_tags
+    CLEANER_AVAILABLE = True
+except ImportError:
+    CLEANER_AVAILABLE = False
+    # 回退实现
+    def clean_special_tags(text: str) -> str:
+        """Fallback: 简单清理标题标记"""
+        import re
+        text = re.sub(r'\[[一二三四五六]级标题\]\s*', '', text)
+        text = re.sub(r'\[/?(表格|代码块)\]', '', text)
+        text = re.sub(r'\[图片:\s*[^\]]*\]', '', text)
+        return text.strip()
+
 # ==============================================================================
 # 常量定义
 # ==============================================================================
@@ -391,6 +406,7 @@ class FilterConfig:
     llm_api_key: Optional[str] = None
     llm_base_url: Optional[str] = None
     llm_thinking_type: Optional[str] = None
+    llm_timeout: float = 60.0  # 传递给硬超时的参考
 
     # 处理配置
     sleep_seconds: float = Constants.DEFAULT_SLEEP_SECONDS
@@ -406,8 +422,7 @@ class FilterConfig:
             "model_name": self.llm_model,
             "temperature": self.llm_temperature,
         }
-        if self.llm_api_key:
-            config["api_key"] = self.llm_api_key
+        # 与 llm_core 对齐：只读取环境变量中的 OPENAI_API_KEY/OPENAI_BASE_URL
         if self.llm_base_url:
             config["base_url"] = self.llm_base_url
         if self.llm_thinking_type:
@@ -822,13 +837,11 @@ cleanliness >= 1
         )
 
         try:
-            response = self.backend.chat_messages(
+            response = self._call_llm_with_timeout(
                 [
                     {"role": "system", "content": self._system_prompt},
                     {"role": "user", "content": user_prompt},
-                ],
-                json_mode=True,
-                response_format={"type": "json_object"},
+                ]
             )
 
             return self._parse_response(response)
@@ -844,6 +857,23 @@ cleanliness >= 1
                 "reason": f"llm_error:{type(e).__name__}",
                 "labels": {},
             }
+
+    def _call_llm_with_timeout(self, messages: List[Dict[str, str]]) -> str:
+        """
+        在硬超时保护下调用 LLM，避免底层客户端卡死。
+        """
+        hard_timeout = max(int(self.config.llm_timeout if hasattr(self.config, "llm_timeout") else 60) + 30, 90)
+
+        def _invoke() -> str:
+            return self.backend.chat_messages(messages, json_mode=True)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_invoke)
+            try:
+                return future.result(timeout=hard_timeout)
+            except FuturesTimeoutError:
+                future.cancel()
+                raise TimeoutError(f"LLM 调用超时 ({hard_timeout}s)") from None
 
     def _parse_response(self, response: str) -> Dict[str, Any]:
         """解析 LLM 响应"""
@@ -1045,6 +1075,13 @@ class OutputManager:
                     f.write(segment.to_json() + "\n")
 
                 self._written_ids.add(segment.id)
+                # 写出后立即刷新缓存，确保断点续跑
+                try:
+                    cache = getattr(segment, "_cache_ref", None)
+                    if cache:
+                        cache.save()
+                except Exception:
+                    pass
                 return True
 
             except Exception as e:
@@ -1266,9 +1303,12 @@ class SegmentCollector:
     def _load_segment(self, path: Path) -> Optional[Segment]:
         """加载单个片段（包含元数据）"""
         try:
-            text = path.read_text(encoding="utf-8").strip()
-            if not text:
+            raw_text = path.read_text(encoding="utf-8").strip()
+            if not raw_text:
                 return None
+
+            # 清理标题标记等特殊格式，获取纯净文本
+            text = clean_special_tags(raw_text)
 
             # 计算相对路径
             try:
@@ -1491,6 +1531,8 @@ class FilterPipeline:
 
         # 保存到缓存
         self.cache.set(segment.id, decision)
+        # 给 OutputManager 的写入提供 cache 引用（便于写入时同步 flush）
+        segment._cache_ref = self.cache  # type: ignore[attr-defined]
 
         # 应用决策
         keep = self._apply_decision(segment, decision)
@@ -1692,14 +1734,19 @@ class ConfigLoader:
                 None,  # 不从配置文件读取 key
             ),
             llm_base_url=pick(
-                args.llm_base_url,
-                os.getenv("LLM_BASE_URL"),
                 cfg_llm.get("base_url"),
+                os.getenv("OPENAI_BASE_URL") or os.getenv("LLM_BASE_URL"),
             ),
             llm_thinking_type=pick(
                 args.llm_thinking,
                 os.getenv("LLM_THINKING_TYPE"),
                 cfg_llm.get("thinking_type"),
+            ),
+            llm_timeout=float(
+                pick(
+                    cfg_llm.get("timeout"),
+                    60.0,
+                )
             ),
             # 处理配置
             sleep_seconds=float(pick(args.sleep_secs, 0.0)),
@@ -1820,11 +1867,6 @@ python tools/filter_corpus_light.py \
         "--llm-api-key",
         default=None,
         help="LLM API Key（推荐使用环境变量）",
-    )
-    llm_group.add_argument(
-        "--llm-base-url",
-        default=None,
-        help="LLM Base URL",
     )
     llm_group.add_argument(
         "--llm-thinking",
