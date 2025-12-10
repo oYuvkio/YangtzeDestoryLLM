@@ -129,7 +129,11 @@ def main():
         "provider": pick(args.provider, cfg_llm.get("provider"), default="openai"),
         "model_name": pick(args.model, cfg_llm.get("model_name"), default="gpt-4o"),
         "temperature": args.temperature,
+        "enable_thinking": cfg_llm.get("enable_thinking", False),
     }
+    # 从 cfg 读取 base_url
+    if cfg_llm.get("base_url"):
+        llm_conf["base_url"] = cfg_llm.get("base_url")
 
     llm = LLMFactory.create(llm_conf)
     tbox = json.loads(Path(args.tbox).read_text(encoding="utf-8"))

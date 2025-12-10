@@ -1534,6 +1534,7 @@ class LLMConfig(BaseConfig):
     temperature: float = 0.1
     max_retries: int = 3
     timeout: float = 60.0
+    enable_thinking: bool = False  # 是否启用思考模式（LongCat-Flash-Thinking）
 
     def to_factory_dict(self) -> Dict[str, Any]:
         """转换为 LLMFactory 接受的字典格式。"""
@@ -1543,6 +1544,7 @@ class LLMConfig(BaseConfig):
             "temperature": self.temperature,
             "max_retries": self.max_retries,
             "timeout": int(self.timeout),
+            "enable_thinking": self.enable_thinking,
         }
 
 
@@ -1805,6 +1807,11 @@ class ConfigLoader:
                     ("llm", "temperature"),
                     0.1,
                     float,
+                )),
+                enable_thinking=bool(self._get_nested_value(
+                    self.yaml_config,
+                    ("llm", "enable_thinking"),
+                    False,
                 )),
             )
 

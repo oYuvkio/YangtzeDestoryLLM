@@ -20,10 +20,11 @@ from typing import Optional
 # 配置
 # =============================================================================
 # 【直接修改这里来配置 API Key、URL 和模型】
-API_KEY = "sk-lkcpmipopqwkzjnckppepdozrxreabkqvoqemsaxyqsoalhe"  # 直接在这里填入你的 API Key
-DEFAULT_BASE_URL = "https://api.siliconflow.cn/v1"  # 修改这里来测试不同的 URL
-DEFAULT_MODEL = "zai-org/GLM-4.5-Air"  # 修改这里来测试不同的模型
+API_KEY = "ak_1dV6Ir1Vk2v024N3049zx1uj5oh1L"  # 直接在这里填入你的 API Key
+DEFAULT_BASE_URL = "https://api.longcat.chat/openai/v1"  # 修改这里来测试不同的 URL
+DEFAULT_MODEL = "LongCat-Flash-Thinking"  # 修改这里来测试不同的模型
 TEST_PROMPT = "你好！请用一句话介绍自己。"
+DEFAULT_ENABLE_THINKING=True
 
 
 def print_header(title: str) -> None:
@@ -69,7 +70,7 @@ def test_openai_sdk(api_key: str, base_url: str, model: str) -> bool:
     try:
         client = OpenAI(
             api_key=api_key,
-            base_url=base_url,
+            base_url=base_url
         )
         
         start = time.time()
@@ -80,6 +81,7 @@ def test_openai_sdk(api_key: str, base_url: str, model: str) -> bool:
             ],
             max_tokens=100,
             temperature=0.7,
+            extra_body={"thinking": {"type": "enabled"}}
         )
         duration = time.time() - start
         
@@ -148,6 +150,7 @@ def test_requests_post(api_key: str, base_url: str, model: str) -> bool:
             headers=headers,
             json=data,
             timeout=30,
+            enable_thinking=True
         )
         duration = time.time() - start
         

@@ -192,7 +192,11 @@ def main() -> None:
         "model_name": model_name,
         "temperature": temperature,
         "thinking_type": cfg_llm.get("thinking_type"),
+        "enable_thinking": cfg_llm.get("enable_thinking", False),
     }
+    # 从 cfg 读取 base_url
+    if cfg_llm.get("base_url"):
+        llm_config["base_url"] = cfg_llm.get("base_url")
 
     print(f"加载 TBox: {tbox_path}")
     print(

@@ -174,7 +174,11 @@ def main():
         "provider": pick(args.provider, cfg_llm.get("provider"), default="zhipu"),
         "model_name": pick(args.model, cfg_llm.get("model_name"), default="GLM-4.5-Air"),
         "temperature": args.temperature,
+        "enable_thinking": cfg_llm.get("enable_thinking", False),
     }
+    # 从 cfg 读取 base_url
+    if cfg_llm.get("base_url"):
+        llm_config["base_url"] = cfg_llm.get("base_url")
 
     # 加载测试数据（JSON/JSONL）
     test_samples: List[Dict[str, Any]] = []

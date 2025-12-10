@@ -188,6 +188,21 @@ class LoggerFactory:
         with cls._lock:
             if cls._logger is not None:
                 cls._logger.setLevel(level)
+                # 如果传入了 log_file 且尚未添加文件处理器，则添加
+                if log_file:
+                    has_file_handler = any(
+                        isinstance(h, logging.FileHandler) 
+                        for h in cls._logger.handlers
+                    )
+                    if not has_file_handler:
+                        log_file.parent.mkdir(parents=True, exist_ok=True)
+                        formatter = logging.Formatter(
+                            "%(asctime)s | %(levelname)-7s | %(message)s",
+                            datefmt="%H:%M:%S",
+                        )
+                        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+                        file_handler.setFormatter(formatter)
+                        cls._logger.addHandler(file_handler)
                 return cls._logger
 
             logger = logging.getLogger(name)
@@ -268,6 +283,15 @@ class Segment:
         rel_path: 相对于语料根目录的路径
         char_count: 字符数
         source_file: 来源文件名
+        
+        # 时空元数据（来自 .meta.json）
+        year: 年份
+        province: 省份
+        river: 河流
+        title: 标题
+        source_type: 来源类型（如 gazette_yearbook）
+        url: 原始 URL
+        
         filter_decision: 过滤决策结果
         filter_labels: LLM 返回的标签信息
         filter_reason: 过滤原因说明
@@ -284,13 +308,22 @@ class Segment:
     group_id: str = ""       # 同源文档组 ID（来自 meta）
     context_before: str = ""  # 预留上下文
     context_after: str = ""   # 预留上下文
+    
+    # 时空元数据
+    year: str = ""           # 年份
+    province: str = ""       # 省份
+    river: str = ""          # 河流
+    title: str = ""          # 标题
+    source_type: str = ""    # 来源类型
+    url: str = ""            # 原始 URL
+    
     filter_decision: Optional[str] = None
     filter_labels: Dict[str, Any] = field(default_factory=dict)
     filter_reason: str = ""
     process_time: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
-        """转换为字典，包含上下文"""
+        """转换为字典，包含上下文和时空元数据"""
         d = asdict(self)
         # 确保上下文字段存在
         d.setdefault("context_before", "")
@@ -298,6 +331,13 @@ class Segment:
         d.setdefault("prev_part_id", "")
         d.setdefault("next_part_id", "")
         d.setdefault("group_id", "")
+        # 确保时空元数据字段存在
+        d.setdefault("year", "")
+        d.setdefault("province", "")
+        d.setdefault("river", "")
+        d.setdefault("title", "")
+        d.setdefault("source_type", "")
+        d.setdefault("url", "")
         return d
 
     def to_json(self) -> str:
@@ -318,6 +358,14 @@ class Segment:
             group_id=data.get("group_id", ""),
             context_before=data.get("context_before", ""),
             context_after=data.get("context_after", ""),
+            # 时空元数据
+            year=data.get("year", ""),
+            province=data.get("province", ""),
+            river=data.get("river", ""),
+            title=data.get("title", ""),
+            source_type=data.get("source_type", ""),
+            url=data.get("url", ""),
+            # 过滤结果
             filter_decision=data.get("filter_decision"),
             filter_labels=data.get("filter_labels", {}),
             filter_reason=data.get("filter_reason", ""),
@@ -407,6 +455,7 @@ class FilterConfig:
     llm_base_url: Optional[str] = None
     llm_thinking_type: Optional[str] = None
     llm_timeout: float = 60.0  # 传递给硬超时的参考
+    llm_enable_thinking: bool = False  # 是否启用思考模式（LongCat-Flash-Thinking）
 
     # 处理配置
     sleep_seconds: float = Constants.DEFAULT_SLEEP_SECONDS
@@ -421,6 +470,7 @@ class FilterConfig:
             "provider": self.llm_provider,
             "model_name": self.llm_model,
             "temperature": self.llm_temperature,
+            "enable_thinking": self.llm_enable_thinking,
         }
         # 与 llm_core 对齐：只读取环境变量中的 OPENAI_API_KEY/OPENAI_BASE_URL
         if self.llm_base_url:
@@ -1337,6 +1387,13 @@ class SegmentCollector:
                 prev_part_id=meta.get("prev_part_id", ""),
                 next_part_id=meta.get("next_part_id", ""),
                 group_id=meta.get("group_id", ""),
+                # 时空元数据
+                year=str(meta.get("year", "")),
+                province=meta.get("province", ""),
+                river=meta.get("river", ""),
+                title=meta.get("title", ""),
+                source_type=meta.get("source_type", ""),
+                url=meta.get("url", ""),
             )
 
         except Exception as e:
@@ -1748,6 +1805,12 @@ class ConfigLoader:
                     60.0,
                 )
             ),
+            llm_enable_thinking=bool(
+                pick(
+                    cfg_llm.get("enable_thinking"),
+                    False,
+                )
+            ),
             # 处理配置
             sleep_seconds=float(pick(args.sleep_secs, 0.0)),
             flush_interval=int(
@@ -1902,8 +1965,8 @@ python tools/filter_corpus_light.py \
     run_group.add_argument(
         "--flush-every",
         type=int,
-        default=Constants.DEFAULT_FLUSH_INTERVAL,
-        help="缓存刷新间隔",
+        default=1,  # 每次 LLM 调用后立即写入缓存
+        help="缓存刷新间隔（1=每次都写入，默认立即刷新）",
     )
     run_group.add_argument(
         "--refilter",

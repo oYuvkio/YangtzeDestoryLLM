@@ -14,19 +14,20 @@ paths:
   p4_corpus_dir: "data/enhancing_onto_corpus_docs"  # P4 文献增强语料目录；被 scripts/p4_enhance_onto.py -> CQLLMPipeline.run_p4_over_corpus 使用。
   p4_process_dir: "outputs/cq_pipeline/process"     # P4 中间文件（per-doc 建议、聚合）输出目录；scripts/p4_enhance_onto.py 使用。
   p4_final_dir: "outputs/cq_pipeline/final"         # P4 增强 TBox 输出目录；scripts/p4_enhance_onto.py 写入多版 TBox。
-  corpus_full: "data/corpus_for_kg/handled_all_kg_corpus"  # 全库语料（切分后）根目录；tools/filter_corpus_light.py、tools/build_eval_pool.py 读取。
-  light_pool: "data/corpus_for_kg/p5_corpus_filtered/light_pool.jsonl"  # 轻过滤输出 jsonl；tools/filter_corpus_light.py 默认写入。
-  eval_pool_dir: "data/p5_eval_pool"                # Eval Pool 输出目录（pool/dev/test）；tools/build_eval_pool.py 使用。
+  corpus_full: "data/corpus_for_kg/handle_used_kg_corpus"  # 全库语料（切分后）根目录；tools/filter_corpus_light.py、tools/build_eval_pool.py 读取。
+  light_pool: "data/corpus_for_kg/filtered_ytz_corpus/light_pool.jsonl"  # 轻过滤输出 jsonl；tools/filter_corpus_light.py 默认写入。
+  eval_pool_dir: "data/corpus_for_kg/eval_pool"                # Eval Pool 输出目录（pool/dev/test）；tools/build_eval_pool.py 使用。
 
 llm:
   # OpenAI 兼容接口配置（API Key 放 .env）
   # 注：LongCat 的 OpenAI 兼容端点是 /openai/v1，代码会自动补全
   base_url: "https://api.longcat.chat/openai/v1"   # API 地址（已补全路径）
-  model_name: "LongCat-Flash-Chat"               # 模型名称
+  model_name: "LongCat-Flash-Thinking"               # 模型名称
   temperature: 0.1                        # 温度参数
   max_retries: 3                          # 重试次数
   timeout: 60                             # 超时时间（秒）
   max_tokens: 8192                        # LongCat 默认需要指定
+  enable_thinking: true                  # 是否启用思考模式（需使用 LongCat-Flash-Thinking 模型）
 
 # 分阶段 LLM 配置（可选，不配置则使用上面的默认配置）
 llm_per_stage:
@@ -54,12 +55,25 @@ filtering:
   keyword_filter: true                   # 是否启用关键词粗筛；filter_corpus_light.py/build_eval_pool.py 共同使用。
 
 eval_pool:
-  target:
-    law_plan: 60                         # Eval Pool 分层抽样：法案/预案类目标条数（tools/build_eval_pool.sample_by_category）。
-    gazette_yearbook: 80                 # Eval Pool 分层抽样：公报/年鉴类目标条数（tools/build_eval_pool.sample_by_category）。
-    case_paper: 100                      # Eval Pool 分层抽样：案例/论文类目标条数（tools/build_eval_pool.sample_by_category）。
-    news_popular: 60                     # Eval Pool 分层抽样：科普/新闻类目标条数（tools/build_eval_pool.sample_by_category）。
-  dev_ratio: 0.6                         # Eval Pool Dev/Test 划分比例（tools/build_eval_pool.split_dev_test）。
+  # 分层策略：source_type（按来源类型）或 topic_label（按主题类型）
+  stratify_by: topic_label
+  
+  # 按 source_type（来源类型）分层的目标配置
+  target_source_type:
+    law_plan: 60                         # 法案/预案类
+    gazette_yearbook: 80                 # 公报/年鉴类
+    case_paper: 100                      # 案例/论文类
+    news_popular: 60                     # 科普/新闻类
+  
+  # 按 topic_label（主题类型）分层的目标配置
+  target_topic_label:
+    disaster_event: 150                  # 灾害事件叙述
+    measure_response: 180                # 防治措施/应急响应
+    background_analysis: 50              # 致灾因子/背景分析
+    institution_regulation: 50           # 制度/法规/流程
+    impact_assessment: 10                # 影响与损失评估
+  
+  dev_ratio: 0.6                         # Eval Pool Dev/Test 划分比例
 
 # P4配置
 p4:

@@ -100,6 +100,33 @@ except ImportError:
 
 
 # ==============================================================================
+# 自定义异常
+# ==============================================================================
+class LLMConfigError(Exception):
+    """
+    LLM 配置级错误（如模型名错误、API Key 无效、返回空响应等）。
+    这类错误应该立即停止，不写入缓存。
+    """
+    pass
+
+
+class LLMRetryExhaustedError(Exception):
+    """
+    LLM 重试耗尽错误（限流、网络问题等经过多次重试后仍失败）。
+    这类错误不写入缓存，退出程序交给人工处理。
+    """
+    pass
+
+
+class LLMParseError(Exception):
+    """
+    LLM 返回结果解析失败（返回了内容但无法解析为有效 JSON）。
+    这类错误可以重试，不写入缓存。
+    """
+    pass
+
+
+# ==============================================================================
 # 常量定义
 # ==============================================================================
 class Constants:
@@ -109,13 +136,13 @@ class Constants:
 
     # 默认参数
     DEFAULT_MIN_CHARS: Final[int] = 150
-    DEFAULT_MAX_CHARS: Final[int] = 400
+    DEFAULT_MAX_CHARS: Final[int] = 2000
     DEFAULT_DEV_RATIO: Final[float] = 0.6
     DEFAULT_MIN_CN_RATIO: Final[float] = 0.3
     DEFAULT_MAX_WEIRD_RATIO: Final[float] = 0.3
 
     # LLM 调用
-    DEFAULT_MAX_TOKENS: Final[int] = 4096
+    DEFAULT_MAX_TOKENS: Final[int] = 8192
     DEFAULT_MAX_RETRIES: Final[int] = 3
     DEFAULT_RETRY_DELAY: Final[float] = 2.0
     RETRY_BACKOFF_FACTOR: Final[float] = 2.0
@@ -125,12 +152,21 @@ class Constants:
     CACHE_FLUSH_INTERVAL: Final[int] = 10
     CACHE_FILE_NAME: Final[str] = "_eval_filter_cache.jsonl"
 
-    # 默认目标分布
+    # 默认目标分布 (按 source_type)
     DEFAULT_TARGET: Final[Dict[str, int]] = {
         "law_plan": 60,
         "gazette_yearbook": 80,
         "case_paper": 100,
         "news_popular": 60,
+    }
+
+    # 默认目标分布 (按 topic_label)
+    DEFAULT_TARGET_TOPIC: Final[Dict[str, int]] = {
+        "disaster_event": 150,
+        "measure_response": 180,
+        "background_analysis": 50,
+        "institution_regulation": 50,
+        "impact_assessment": 10,
     }
 
 
@@ -245,10 +281,42 @@ class Segment:
     text: str
     rel_path: str
     filter_decision: Optional[Dict[str, Any]] = None
+    # 时空元数据（从 LLM 筛选结果中提取）
+    extracted_time: Optional[str] = None
+    extracted_location: Optional[str] = None
+    extracted_issuer: Optional[str] = None
+    temporal_detail: Optional[int] = None
+    spatial_detail: Optional[int] = None
+    issuer_detail: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return asdict(self)
+
+    def update_spatiotemporal_from_decision(self) -> None:
+        """从 filter_decision 中提取并更新时空主体元数据"""
+        if not self.filter_decision or not isinstance(self.filter_decision, dict):
+            return
+        labels = self.filter_decision.get("labels", {})
+        if not labels:
+            return
+        # 提取时间/空间/主体信息
+        self.extracted_time = labels.get("extracted_time") or None
+        self.extracted_location = labels.get("extracted_location") or None
+        self.extracted_issuer = labels.get("extracted_issuer") or None
+        # 提取详细程度评分
+        try:
+            self.temporal_detail = int(labels.get("temporal_detail", 0))
+        except (ValueError, TypeError):
+            self.temporal_detail = 0
+        try:
+            self.spatial_detail = int(labels.get("spatial_detail", 0))
+        except (ValueError, TypeError):
+            self.spatial_detail = 0
+        try:
+            self.issuer_detail = int(labels.get("issuer_detail", 0))
+        except (ValueError, TypeError):
+            self.issuer_detail = 0
 
 
 @dataclass
@@ -622,9 +690,13 @@ def save_filter_cache(cache_dict: Dict[str, dict], path: Path) -> None:
 def judge_segment(seg: Segment, backend, max_retries: int = 3) -> Dict[str, Any]:
     """
     调用 LLM 按提示词评估段落质量与相关性。
-    返回 JSON dict，失败时返回 keep_for_eval=False 的占位结果。
-
-    带有重试机制，对临时性错误进行指数退避重试。
+    
+    返回有效的 JSON dict，否则抛出异常：
+    - LLMConfigError: 配置错误（空响应、模型不存在等）
+    - LLMParseError: 返回内容无法解析
+    - LLMRetryExhaustedError: 重试耗尽后仍失败
+    
+    注意：只有返回有效结果时才应写入缓存，异常情况不写缓存。
     """
     user_prompt = EVAL_SEGMENT_FILTER_USER_TEMPLATE.replace(
         "{segment_text}", seg.text[:3000]
@@ -632,6 +704,7 @@ def judge_segment(seg: Segment, backend, max_retries: int = 3) -> Dict[str, Any]
 
     delay = Constants.DEFAULT_RETRY_DELAY
     last_error = None
+    parse_failures = 0  # JSON 解析失败次数
 
     for attempt in range(max_retries + 1):
         try:
@@ -644,54 +717,71 @@ def judge_segment(seg: Segment, backend, max_retries: int = 3) -> Dict[str, Any]
             )
 
             if not resp:
-                return {
-                    "keep_for_eval": False,
-                    "reason": "llm_empty_response",
-                    "labels": {},
-                }
+                # 空响应通常意味着配置错误（如模型名错误），抛出异常立即停止
+                raise LLMConfigError(
+                    f"LLM 返回空响应，请检查模型名和 API Key 配置是否正确 (segment_id={seg.id})"
+                )
 
             try:
                 parsed = json.loads(resp)
                 if not isinstance(parsed, dict):
                     raise ValueError("not a dict")
+                # 验证返回结果是否包含必要字段
+                if "keep_for_eval" not in parsed and "labels" not in parsed:
+                    raise ValueError("missing required fields")
                 return parsed
-            except json.JSONDecodeError:
-                return {
-                    "keep_for_eval": False,
-                    "reason": "llm_parse_error",
-                    "raw": resp[:500],
-                    "labels": {},
-                }
+            except (json.JSONDecodeError, ValueError) as e:
+                parse_failures += 1
+                if attempt < max_retries:
+                    logger.warning(
+                        f"LLM 返回解析失败 ({seg.id})[{attempt+1}/{max_retries}]: {e}, 响应: {resp[:200]}..."
+                    )
+                    time.sleep(delay)
+                    delay = min(delay * Constants.RETRY_BACKOFF_FACTOR, Constants.MAX_RETRY_DELAY)
+                    continue
+                else:
+                    raise LLMParseError(
+                        f"LLM 返回无法解析为有效 JSON (segment_id={seg.id}): {resp[:200]}"
+                    )
 
+        except (LLMConfigError, LLMParseError):
+            # 配置错误和解析错误直接向上抛出
+            raise
         except Exception as e:
             last_error = e
             err_str = str(e).lower()
 
-            # 严重错误：账号封禁、限流，直接抛出
+            # 配置级错误：直接抛出，不重试
             if _AccountBlockedError and isinstance(e, _AccountBlockedError):
-                raise
-            if _RateLimitError and isinstance(e, _RateLimitError):
-                raise
+                raise LLMConfigError(f"账号被封禁: {e}")
             if "401" in err_str or "unauthorized" in err_str:
-                raise
-            if "429" in err_str or "rate" in err_str:
-                raise
-
+                raise LLMConfigError(f"API Key 无效或账户异常: {e}")
+            if "404" in err_str and "model" in err_str:
+                raise LLMConfigError(f"模型不存在: {e}")
+            
+            # 限流错误：重试，但最终仍失败则抛出
+            is_rate_limit = (
+                (_RateLimitError and isinstance(e, _RateLimitError)) or
+                "429" in err_str or "rate" in err_str or "limit" in err_str
+            )
+            
             # 可重试错误
             if attempt < max_retries:
+                retry_msg = "限流" if is_rate_limit else "网络/服务错误"
                 logger.warning(
-                    f"LLM 调用失败 ({seg.id})[重试 {attempt+1}/{max_retries}]: {e}"
+                    f"LLM 调用失败 ({seg.id})[{retry_msg}, 重试 {attempt+1}/{max_retries}]: {e}"
                 )
-                time.sleep(delay)
+                # 限流时等待更长时间
+                wait_time = delay * 3 if is_rate_limit else delay
+                time.sleep(wait_time)
                 delay = min(delay * Constants.RETRY_BACKOFF_FACTOR, Constants.MAX_RETRY_DELAY)
             else:
                 logger.error(f"LLM 调用最终失败 ({seg.id}): {e}")
 
-    return {
-        "keep_for_eval": False,
-        "reason": f"llm_error: {str(last_error)[:100]}",
-        "labels": {},
-    }
+    # 重试耗尽，抛出异常
+    raise LLMRetryExhaustedError(
+        f"LLM 调用经过 {max_retries+1} 次尝试后仍失败 (segment_id={seg.id}): {last_error}"
+    )
 
 
 def _get_score(decision: dict, key: str) -> int:
@@ -703,25 +793,85 @@ def _get_score(decision: dict, key: str) -> int:
         return -1
 
 
-def keep_by_eval_rule(decision: dict) -> bool:
+def keep_by_eval_rule(decision: dict, strict_completeness: bool = True) -> bool:
     """
-    严格规则：relevance>=1 & kg_potential>=1 & cleanliness>=1 且 text_quality 非 garbled。
-    与旧版字段兼容。
+    严格规则（最新版本，按类型区分完备性要求）：
+    
+    必须满足以下条件：
+    1) is_water_disaster_domain = true
+    2) text_quality != "garbled" 且 cleanliness >= 1
+    3) contains_event_or_rule = true 且 kg_potential >= 1
+    4) relevance_yangtze >= 1
+    5) 信息完备性（按 topic_label 类型区分）：
+       - disaster_event / impact_assessment：temporal >= 1 且 spatial >= 1
+       - institution_regulation：temporal >= 1 或 issuer >= 1
+       - measure_response：temporal >= 1 或 spatial >= 1 或 issuer >= 1
+       - background_analysis / other：temporal >= 1 或 spatial >= 1
+    
+    Args:
+        decision: LLM 返回的判定结果字典
+        strict_completeness: 是否强制要求信息完备性（默认 True）
+    
+    Returns:
+        bool: 是否保留该片段
     """
     labels = decision.get("labels", {}) if isinstance(decision, dict) else {}
+    
+    # 1. 领域相关性
     domain = labels.get("is_water_disaster_domain")
-    text_quality = labels.get("text_quality")
     if not domain:
         return False
+    
+    # 2. 文本质量
+    text_quality = labels.get("text_quality")
     if text_quality == "garbled":
         return False
-    relevance = _get_score(decision, "relevance_yangtze")
-    kg_potential = _get_score(decision, "kg_potential")
     cleanliness = _get_score(decision, "cleanliness")
-    if relevance >= 1 and kg_potential >= 1 and cleanliness >= 1:
-        return True
-    # 兼容旧 keep_for_eval 字段
-    return bool(decision.get("keep_for_eval")) and text_quality in {"good", "noisy"}
+    if cleanliness < 1:
+        return False
+    
+    # 3. 事件/规则内容 & KG 潜力
+    contains_event = labels.get("contains_event_or_rule", False)
+    kg_potential = _get_score(decision, "kg_potential")
+    if not contains_event or kg_potential < 1:
+        return False
+    
+    # 4. 长江相关性
+    relevance = _get_score(decision, "relevance_yangtze")
+    if relevance < 1:
+        return False
+    
+    # 5. 信息完备性（按类型区分）
+    if strict_completeness:
+        temporal = _get_score(decision, "temporal_detail")
+        spatial = _get_score(decision, "spatial_detail")
+        issuer = _get_score(decision, "issuer_detail")
+        topic_label = labels.get("topic_label", "")
+        source_guess = labels.get("source_guess", "")
+        
+        # 全部为 0 直接拒绝
+        if temporal < 1 and spatial < 1 and issuer < 1:
+            return False
+        
+        # 按类型区分完备性要求
+        if topic_label in ("disaster_event", "impact_assessment"):
+            # 灾害事件/影响评估：必须有时间+地点
+            if temporal < 1 or spatial < 1:
+                return False
+        elif topic_label == "institution_regulation" or source_guess == "law_plan":
+            # 制度/法规类：需要时间或发布主体
+            if temporal < 1 and issuer < 1:
+                return False
+        elif topic_label == "measure_response":
+            # 措施响应类：至少有一项明确
+            if temporal < 1 and spatial < 1 and issuer < 1:
+                return False
+        else:
+            # background_analysis 或 other：需要时间或空间
+            if temporal < 1 and spatial < 1:
+                return False
+    
+    return True
 
 
 def filter_segments_with_llm(
@@ -781,25 +931,31 @@ def filter_segments_with_llm(
                 decision = cache.get(seg.id)
                 stats.from_cache += 1
             else:
-                # 调用 LLM
+                # 调用 LLM（只有成功获得有效结果才写入缓存）
                 try:
                     decision = judge_segment(seg, backend, max_retries=max_retries)
-                    cache.put(seg.id, decision)  # 立即保存
-                except Exception as e:
-                    # 严重错误，终止处理
-                    if _AccountBlockedError and isinstance(e, _AccountBlockedError):
-                        raise
-                    if _RateLimitError and isinstance(e, _RateLimitError):
-                        raise
-                    stats.llm_errors += 1
-                    decision = {
-                        "keep_for_eval": False,
-                        "reason": f"llm_error: {str(e)[:100]}",
-                        "labels": {},
-                    }
+                    # 成功获得有效结果，写入缓存
                     cache.put(seg.id, decision)
+                except LLMConfigError as e:
+                    # 配置级错误：立即停止，不写入缓存
+                    logger.error(f"\n\u274c 配置错误，立即停止: {e}")
+                    logger.error("提示: 请检查 --llm-model 或 cfg.yaml 中的模型名配置是否正确")
+                    raise  # 重新抛出，终止处理
+                except LLMParseError as e:
+                    # 解析错误：不写缓存，终止处理
+                    logger.error(f"\n\u274c LLM 返回无法解析: {e}")
+                    logger.error("提示: LLM 返回了内容但无法解析为有效 JSON，请检查 Prompt 或更换模型")
+                    raise
+                except LLMRetryExhaustedError as e:
+                    # 重试耗尽：不写缓存，终止处理交人工处理
+                    logger.error(f"\n\u274c 重试耗尽: {e}")
+                    logger.error("提示: 可能是限流/网络问题，请稍后重试或更换 API Key")
+                    raise
 
             seg.filter_decision = decision
+            # 从 decision 中提取时空元数据
+            seg.update_spatiotemporal_from_decision()
+            
             if keep_by_eval_rule(decision):
                 kept.append(seg)
                 stats.kept += 1
@@ -856,7 +1012,92 @@ def collect_segments(root: Path, min_chars: int, max_chars: int) -> List[Segment
     return segments
 
 
+def load_segments_from_jsonl(jsonl_path: Path, min_chars: int, max_chars: int) -> List[Segment]:
+    """
+    从 filter_corpus_light.py 的 JSONL 输出加载片段。
+    
+    字段映射:
+        filter_corpus_light.Segment -> build_eval_pool.Segment
+        - id -> id
+        - text -> text
+        - rel_path -> rel_path
+        - source_type -> source_type
+        - title -> doc_title
+        - year -> year
+        - filter_labels -> filter_decision (包装为兼容格式)
+    
+    Args:
+        jsonl_path: JSONL 文件路径
+        min_chars: 最小字符数过滤
+        max_chars: 最大字符数过滤
+    
+    Returns:
+        转换后的 Segment 列表
+    """
+    segments: List[Segment] = []
+    if not jsonl_path.exists():
+        logger.error(f"JSONL 文件不存在: {jsonl_path}")
+        return segments
+    
+    with jsonl_path.open("r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSONL 第 {line_num} 行解析失败: {e}")
+                continue
+            
+            text = data.get("text", "")
+            # 长度过滤
+            if len(text) < min_chars or len(text) > max_chars:
+                continue
+            
+            # 字段映射
+            seg_id = data.get("id", "")
+            source_type = data.get("source_type", "unknown")
+            doc_title = data.get("title", data.get("doc_title", ""))
+            rel_path = data.get("rel_path", "")
+            
+            # 年份处理（filter_corpus_light 输出为字符串）
+            year_raw = data.get("year", "")
+            year: Optional[int] = None
+            if year_raw:
+                try:
+                    year = int(year_raw)
+                except (ValueError, TypeError):
+                    pass
+            
+            # 如果 filter_corpus_light 已经做过 LLM 判定，保留其结果
+            # 将 filter_labels 包装到 filter_decision 中，以便后续可以获取 topic_label
+            existing_labels = data.get("filter_labels", {})
+            existing_decision = data.get("filter_decision", "")
+            
+            # 构建 filter_decision，包含 labels 信息
+            filter_decision_data = {
+                "keep_for_eval": existing_decision == "keep",
+                "labels": existing_labels,
+            }
+            
+            segments.append(Segment(
+                id=seg_id,
+                source_type=source_type,
+                doc_title=doc_title,
+                year=year,
+                text=text,
+                rel_path=rel_path,
+                filter_decision=filter_decision_data,
+            ))
+    
+    logger.info(f"从 JSONL 加载 {len(segments)} 条片段（长度范围 {min_chars}~{max_chars}）")
+    return segments
+
+
 def _get_topic(seg: Segment) -> str:
+    """从 filter_decision 或 filter_labels 中获取 topic_label"""
+    # 优先从 filter_decision.labels 获取
     if seg.filter_decision and isinstance(seg.filter_decision, dict):
         labels = seg.filter_decision.get("labels", {})
         topic = labels.get("topic_label") or labels.get("main_topic")
@@ -865,55 +1106,98 @@ def _get_topic(seg: Segment) -> str:
     return "unknown"
 
 
-def sample_by_category(segments: List[Segment], target: Dict[str, int]) -> List[Segment]:
+def _get_stratify_value(seg: Segment, stratify_by: str) -> str:
+    """根据分层字段获取分层值"""
+    if stratify_by == "topic_label":
+        return _get_topic(seg)
+    else:  # source_type
+        return seg.source_type or "unknown"
+
+
+def sample_by_category(
+    segments: List[Segment],
+    target: Dict[str, int],
+    stratify_by: str = "source_type",
+) -> List[Segment]:
     """
-    分层随机采样：先按 source_type，再尽量覆盖不同 topic_label。
+    分层随机采样。
+    
+    Args:
+        segments: 待采样的片段列表
+        target: 各类别抽取目标，如 {"disaster_event": 150, ...}
+        stratify_by: 分层字段，"source_type" 或 "topic_label"
     """
+    # 按分层字段分组
     by_cat: Dict[str, List[Segment]] = {}
     for seg in segments:
-        by_cat.setdefault(seg.source_type, []).append(seg)
+        cat_value = _get_stratify_value(seg, stratify_by)
+        by_cat.setdefault(cat_value, []).append(seg)
+    
+    # 打印各类别实际数量
+    logger.info(f"按 {stratify_by} 分层，各类别数量:")
+    for cat, segs_list in sorted(by_cat.items(), key=lambda x: -len(x[1])):
+        logger.info(f"  {cat}: {len(segs_list)}")
 
     sampled: List[Segment] = []
     for cat, num in target.items():
         pool = by_cat.get(cat, [])
         if not pool:
+            logger.warning(f"类别 '{cat}' 无数据，跳过")
             continue
         random.shuffle(pool)
-        topic_buckets: Dict[str, List[Segment]] = {}
-        for s in pool:
-            topic_buckets.setdefault(_get_topic(s), []).append(s)
-        for lst in topic_buckets.values():
-            random.shuffle(lst)
+        
+        # 如果按 topic_label 分层，则不再做二级 topic 轮询
+        if stratify_by == "topic_label":
+            picked = pool[:num]
+        else:
+            # 按 source_type 分层时，尽量覆盖不同 topic_label
+            topic_buckets: Dict[str, List[Segment]] = {}
+            for s in pool:
+                topic_buckets.setdefault(_get_topic(s), []).append(s)
+            for lst in topic_buckets.values():
+                random.shuffle(lst)
 
-        picked: List[Segment] = []
-        topics = list(topic_buckets.keys())
-        # 轮询 topic，保证覆盖
-        while len(picked) < num and topics:
-            topics = [t for t in topics if topic_buckets.get(t)]
-            if not topics:
-                break
-            for t in list(topics):
-                if len(picked) >= num:
+            picked: List[Segment] = []
+            topics = list(topic_buckets.keys())
+            # 轮询 topic，保证覆盖
+            while len(picked) < num and topics:
+                topics = [t for t in topics if topic_buckets.get(t)]
+                if not topics:
                     break
-                if topic_buckets[t]:
-                    picked.append(topic_buckets[t].pop())
-        # 兜底：如仍不足，直接补齐
-        if len(picked) < num:
-            remaining = [s for lst in topic_buckets.values() for s in lst]
-            random.shuffle(remaining)
-            picked.extend(remaining[: max(0, num - len(picked))])
+                for t in list(topics):
+                    if len(picked) >= num:
+                        break
+                    if topic_buckets[t]:
+                        picked.append(topic_buckets[t].pop())
+            # 兜底：如仍不足，直接补齐
+            if len(picked) < num:
+                remaining = [s for lst in topic_buckets.values() for s in lst]
+                random.shuffle(remaining)
+                picked.extend(remaining[: max(0, num - len(picked))])
 
         sampled.extend(picked)
+        logger.info(f"  {cat}: 目标 {num}, 实际抽取 {len(picked)}")
+    
     return sampled
 
 
-def split_dev_test(sampled: List[Segment], dev_ratio: float = 0.6) -> Tuple[List[Segment], List[Segment]]:
+def split_dev_test(
+    sampled: List[Segment],
+    dev_ratio: float = 0.6,
+    stratify_by: str = "source_type",
+) -> Tuple[List[Segment], List[Segment]]:
     """
-    在每个 source_type 组内随机划分 Dev/Test，保持分布。
+    在每个类别组内随机划分 Dev/Test，保持分布。
+    
+    Args:
+        sampled: 已采样的片段列表
+        dev_ratio: Dev 集比例
+        stratify_by: 分层字段，"source_type" 或 "topic_label"
     """
     by_cat: Dict[str, List[Segment]] = {}
     for seg in sampled:
-        by_cat.setdefault(seg.source_type, []).append(seg)
+        cat_value = _get_stratify_value(seg, stratify_by)
+        by_cat.setdefault(cat_value, []).append(seg)
 
     dev, test = [], []
     for cat, segs in by_cat.items():
@@ -961,7 +1245,9 @@ def main() -> int:
     # 配置文件
     parser.add_argument("--cfg", default="configs/cfg.yaml", help="配置文件路径，命令行参数优先级更高")
     # 路径参数
-    parser.add_argument("--root", default=None, help="源语料根目录")
+    parser.add_argument("--root", default=None, help="源语料根目录（与 --input-jsonl 二选一）")
+    parser.add_argument("--input-jsonl", default=None, 
+                        help="从 filter_corpus_light.py 的 JSONL 输出读取（与 --root 二选一）")
     parser.add_argument("--out-dir", default=None, help="输出目录")
     # 分段参数
     parser.add_argument("--min-chars", type=int, default=None, help=f"段落最小字符数，默认 {Constants.DEFAULT_MIN_CHARS}")
@@ -969,6 +1255,8 @@ def main() -> int:
     # 抽样参数
     parser.add_argument("--target", nargs="+", default=None,
                         help="各类别抽取目标，如 law_plan=60 gazette_yearbook=80")
+    parser.add_argument("--stratify-by", choices=["source_type", "topic_label"], default="source_type",
+                        help="分层字段：source_type(按数据来源) 或 topic_label(按主题类型)，默认 source_type")
     parser.add_argument("--dev-ratio", type=float, default=None,
                         help=f"Dev 集比例，默认 {Constants.DEFAULT_DEV_RATIO}")
     parser.add_argument("--seed", type=int, default=None, help="随机种子，用于复现结果")
@@ -1025,21 +1313,52 @@ def main() -> int:
     cfg_llm = cfg.get("llm", {}) if isinstance(cfg, dict) else {}
 
     # 核心路径
-    root = Path(pick(args.root, cfg_paths.get("corpus_full"), "data/corpus_for_kg/handled_all_kg_corpus"))
+    input_jsonl = Path(args.input_jsonl) if args.input_jsonl else None
+    root = Path(pick(args.root, cfg_paths.get("corpus_full"), "data/corpus_for_kg/handled_all_kg_corpus")) if not input_jsonl else None
     out_dir = Path(pick(args.out_dir, cfg_paths.get("eval_pool_dir"), "data/p5_eval_pool"))
 
-    if not root.exists():
-        logger.error(f"源目录不存在: {root}")
-        return 1
-
-    # 抽样目标
-    target_cfg = cfg_evalpool.get("target") or {}
-    if args.target:
-        target = parse_target(args.target)
-    elif target_cfg:
-        target = {k: int(v) for k, v in target_cfg.items()}
+    # 输入源校验
+    if input_jsonl:
+        if not input_jsonl.exists():
+            logger.error(f"JSONL 文件不存在: {input_jsonl}")
+            return 1
+        logger.info(f"输入模式: 从 JSONL 读取 ({input_jsonl})")
     else:
-        target = dict(Constants.DEFAULT_TARGET)
+        if not root or not root.exists():
+            logger.error(f"源目录不存在: {root}")
+            return 1
+        logger.info(f"输入模式: 从目录扫描 ({root})")
+
+    # 抽样目标与分层字段
+    # 优先级：命令行 > cfg.yaml > 默认值
+    stratify_by = pick(
+        args.stratify_by if args.stratify_by != "source_type" else None,  # 命令行显式指定时优先
+        cfg_evalpool.get("stratify_by"),
+        "source_type"  # 默认值
+    )
+    # 如果命令行显式指定了 --stratify-by，优先使用命令行值
+    if args.stratify_by and args.stratify_by != "source_type":
+        stratify_by = args.stratify_by
+    
+    # 根据分层字段选择目标配置
+    if args.target:
+        # 命令行显式指定优先
+        target = parse_target(args.target)
+    else:
+        # 从 cfg.yaml 读取对应分层字段的目标配置
+        if stratify_by == "topic_label":
+            target_cfg = cfg_evalpool.get("target_topic_label") or cfg_evalpool.get("target") or {}
+            default_target = Constants.DEFAULT_TARGET_TOPIC
+        else:
+            target_cfg = cfg_evalpool.get("target_source_type") or cfg_evalpool.get("target") or {}
+            default_target = Constants.DEFAULT_TARGET
+        
+        if target_cfg:
+            target = {k: int(v) for k, v in target_cfg.items()}
+        else:
+            target = dict(default_target)
+    
+    logger.info(f"分层策略: {stratify_by}, 目标配置: {target}")
 
     # 分段参数
     min_chars = pick(args.min_chars, cfg_filter.get("min_chars"), Constants.DEFAULT_MIN_CHARS)
@@ -1069,8 +1388,12 @@ def main() -> int:
     logger.info("=" * 60)
 
     # 1. 收集段落
-    logger.info(f"扫描源目录: {root}")
-    segs = collect_segments(root, min_chars, max_chars)
+    if input_jsonl:
+        logger.info(f"从 JSONL 加载: {input_jsonl}")
+        segs = load_segments_from_jsonl(input_jsonl, min_chars, max_chars)
+    else:
+        logger.info(f"扫描源目录: {root}")
+        segs = collect_segments(root, min_chars, max_chars)
     logger.info(f"收集段落 {len(segs)} 条")
 
     if not segs:
@@ -1107,6 +1430,8 @@ def main() -> int:
             # 基本参数
             llm_conf["temperature"] = pick(args.llm_temperature, cfg_llm.get("temperature"), 0.0)
             llm_conf["max_tokens"] = pick(args.llm_max_tokens, cfg_llm.get("max_tokens"), Constants.DEFAULT_MAX_TOKENS)
+            # 思考模式（用于 LongCat-Flash-Thinking 等模型）
+            llm_conf["enable_thinking"] = cfg_llm.get("enable_thinking", False)
             # 连接/鉴权相关
             base_url = pick(cfg_llm.get("base_url"))
             if base_url:
@@ -1135,23 +1460,42 @@ def main() -> int:
     except KeyboardInterrupt:
         logger.warning("\n用户中断，进度已保存")
         return 130
+    except LLMConfigError as e:
+        # 配置级错误：不写缓存，立即停止
+        logger.error(f"\n\u274c 配置错误: {e}")
+        logger.error("提示: 请检查 --llm-model 或 cfg.yaml 中的模型名/API Key 配置")
+        logger.error("未写入缓存，修正配置后重新运行即可")
+        return 1
+    except LLMParseError as e:
+        # 解析错误：不写缓存
+        logger.error(f"\n\u274c LLM 返回解析失败: {e}")
+        logger.error("提示: LLM 返回了内容但无法解析为有效 JSON")
+        logger.error("未写入缓存，请检查 Prompt 或更换模型后重试")
+        return 1
+    except LLMRetryExhaustedError as e:
+        # 重试耗尽：不写缓存，退出交人工处理
+        logger.error(f"\n\u274c LLM 调用重试耗尽: {e}")
+        logger.error("提示: 可能是限流/网络问题，请稍后重试或更换 API Key")
+        logger.error("未写入缓存，修复问题后从断点继续运行即可")
+        return 2
     except Exception as e:
         err_str = str(e).lower()
         if "401" in err_str or "blocked" in err_str or "unauthorized" in err_str:
-            logger.error(f"❌ LLM 账号/Key 可能被封禁: {e}")
+            logger.error(f"\u274c LLM 账号/Key 可能被封禁: {e}")
         elif "429" in err_str or "rate" in err_str:
-            logger.error(f"⚠️ LLM 触发限流: {e}")
+            logger.error(f"\u26a0\ufe0f LLM 触发限流: {e}")
         else:
             logger.error(f"LLM 过滤失败: {e}")
         logger.info("进度已保存，可稍后重试继续")
         return 2
 
     # 4. 分层抽样
-    sampled = sample_by_category(filtered, target)
+    logger.info(f"分层字段: {stratify_by}")
+    sampled = sample_by_category(filtered, target, stratify_by=stratify_by)
     logger.info(f"按类别采样 {len(sampled)} 条（目标: {target}）")
 
-    # 5. 划分 Dev/Test - 修复：使用正确的 dev_ratio
-    dev, test = split_dev_test(sampled, dev_ratio)
+    # 5. 划分 Dev/Test
+    dev, test = split_dev_test(sampled, dev_ratio, stratify_by=stratify_by)
     logger.info(f"划分 Dev/Test -> Dev {len(dev)} | Test {len(test)} (ratio={dev_ratio})")
 
     # 6. 保存结果
@@ -1165,6 +1509,7 @@ def main() -> int:
     logger.info(f"  - pool.jsonl: {len(sampled)} 条")
     logger.info(f"  - dev.jsonl:  {len(dev)} 条")
     logger.info(f"  - test.jsonl: {len(test)} 条")
+    logger.info(f"  分层字段: {stratify_by}")
     logger.info("=" * 60)
 
     return 0

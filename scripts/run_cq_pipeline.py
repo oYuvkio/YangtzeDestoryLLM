@@ -600,6 +600,7 @@ def main() -> None:
                             cfg_llm.get("base_url")),
             "api_key": args.llm_api_key,  # 仅从 CLI 读取
             "thinking_type": cfg_llm.get("thinking_type"),
+            "enable_thinking": cfg_llm.get("enable_thinking", False),
         }
     
     def create_pipeline(stage: str) -> CQLLMPipeline:

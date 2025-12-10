@@ -464,15 +464,20 @@ class LLMClient:
         self.timeout = config.get("timeout", 60)
         self.max_tokens = config.get("max_tokens", 8192)  # LongCat 默认需要指定
         
+        # ===== 思考模式配置 =====
+        self.enable_thinking = config.get("enable_thinking", False)
+        
         # ===== 检测 API 提供商特性 =====
         self._provider_name = self._detect_provider(base_url)
         self._supports_response_format = self._provider_name not in _PROVIDERS_NO_RESPONSE_FORMAT
         
         # 记录初始化信息
         key_preview = self._current_api_key[:8] + "..."
+        thinking_status = "✅" if self.enable_thinking else "❌"
         logger.info(
             f"LLM 客户端初始化: model={self.model}, "
             f"provider={self._provider_name or 'openai'}, "
+            f"thinking={thinking_status}, "
             f"key={key_preview}, "
             f"available_keys={self._key_manager.available_count}/{self._key_manager.total_count}"
         )
@@ -589,6 +594,13 @@ class LLMClient:
                     params["response_format"] = {"type": "json_object"}
                 
                 # ===== 发送请求 =====
+                # 如果启用思考模式，添加 extra_body 参数
+                if self.enable_thinking:
+                    params["extra_body"] = {"thinking": {"type": "enabled"}}
+                    logger.debug(f"🧠 思考模式已启用，正在调用 LLM...")
+                else:
+                    logger.debug(f"💬 普通模式调用 LLM...")
+                
                 resp = self.client.chat.completions.create(**params)
                 content = resp.choices[0].message.content or ""
                 

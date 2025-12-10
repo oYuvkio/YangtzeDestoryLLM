@@ -538,12 +538,12 @@ EVAL_SEGMENT_FILTER_SYSTEM = """
 """
 
 EVAL_SEGMENT_FILTER_USER_TEMPLATE = """
-现在给你一段从文献中切分出来的文本片段，请你判断它是否适合放入“长江流域水旱灾害知识图谱”的评估语料库（eval pool）。
+现在给你一段从文献中切分出来的文本片段，请你判断它是否适合放入"长江流域水旱灾害知识图谱"的评估语料库（eval pool）。
 
 【评估维度】
 
 1. 相关性（领域）
-   - 如果内容主要讨论以下主题之一，则认为 “与水旱灾害领域相关（is_water_disaster_domain = true）”：
+   - 如果内容主要讨论以下主题之一，则认为 "与水旱灾害领域相关（is_water_disaster_domain = true）"：
      * 洪水、暴雨洪涝、山洪、城市内涝、干旱、枯水、水资源短缺；
      * 与水旱灾害相关的致灾因子：极端降水、持续少雨、高温热浪、台风、风暴潮、地质灾害诱发堰塞湖等；
      * 防汛抗旱、防洪排涝、水利工程运行（堤防、水库、蓄滞洪区、水闸、泵站等）；
@@ -551,14 +551,15 @@ EVAL_SEGMENT_FILTER_USER_TEMPLATE = """
      * 灾害防御与应急响应：预警、会商、响应级别、转移安置、应急抢险、水库调度、防御工作总结等。
    - 如果内容主要是与上述无关的算法推导、自然语言处理方法说明、纯数学公式、与其他领域（如交通事故、金融、教育等）相关，请认为 is_water_disaster_domain = false。
 
-2. 是否与“长江流域”紧密相关（is_yangtze_related）
-   - 如果段落中出现 “长江” 或其主要支流/区域（如：汉江、嘉陵江、洞庭湖、鄱阳湖、三峡水库、长江上游/中游/下游、沿江城市等），则 is_yangtze_related = true；
+2. 是否与"长江流域"紧密相关（is_yangtze_related）
+   - 如果段落中出现 "长江" 或其主要支流/区域（如：汉江、嘉陵江、洞庭湖、鄱阳湖、三峡水库、长江上游/中游/下游、沿江城市等），则 is_yangtze_related = true；
    - 如果只是讲中国其他流域或全球一般性水旱灾害，且没有明显长江线索，则 is_yangtze_related = false。
 
-3. 文本质量（text_quality）
-   - good：文本基本连贯，句子完整，几乎没有乱码、奇怪的分词或严重排版错误，能看懂主要意思；
-   - noisy：少量乱码或排版问题，但不影响理解（比如个别英文大小写混乱、个别符号插入、少量断行）；
-   - garbled：大量乱码或字符残片，句子严重破碎，几乎看不出原意；或者几乎全是公式、变量名、单词碎片、参考文献条目，缺乏自然语言句子。这种情况不要收进 eval_pool。
+3. 文本质量（text_quality）—— 请严格区分！
+   - excellent：文本非常规范，句子完整流畅，无任何乱码或排版问题，表述清晰专业；
+   - good：文本基本连贯，句子完整，偶有小瑕疵但不影响理解；
+   - noisy：有明显的排版问题、少量乱码、断句不自然，但主要内容仍可理解；
+   - garbled：大量乱码或字符残片，句子严重破碎，几乎看不出原意；或几乎全是公式、变量名、单词碎片、参考文献条目。
 
 4. 是否包含对 KG 有用的内容（contains_event_or_rule）
    - true：段落中至少包含一类：
@@ -566,7 +567,7 @@ EVAL_SEGMENT_FILTER_USER_TEMPLATE = """
      * 描述防汛抗旱/应急响应的制度、流程、职责分工、启动条件、响应级别等（类似应急预案、公报中的规则性文字）；
      * 描述水利工程（堤防、水库、闸站、蓄滞洪区等）在防灾中的功能、运行方式、调度规则；
      * 描述灾害致灾因子、气候异常、降水异常等科学事实或统计特征。
-   - false：纯方法论说明（如“本文采用 LDA 模型对新闻进行主题分析…”）、纯技术细节、不含任何具体灾害/防御/规则/影响事实的段落，一般认为不适合作为知识图谱 eval 样本。
+   - false：纯方法论说明（如"本文采用 LDA 模型对新闻进行主题分析…"）、纯技术细节、不含任何具体灾害/防御/规则/影响事实的段落，一般认为不适合作为知识图谱 eval 样本。
 
 5. 可能来源类型（source_guess）
    - law_plan：法律、条例、应急预案、制度办法等规范性文件；
@@ -575,41 +576,88 @@ EVAL_SEGMENT_FILTER_USER_TEMPLATE = """
    - news_popular：新闻报道、官方科普文章、媒体评论等；
    - other：无法判断或混合。
 
+6. 信息完备性（关键维度！）
+   知识图谱的核心价值在于结构化的关联信息，请**分类型**严格评估：
+   
+   【时间信息】
+   has_temporal_info（是否包含明确的时间信息）：
+   - true：段落中出现明确的年份（如"1998年""2020年7月"）、日期、时间段、时间范围等
+   - false：没有任何时间线索，或只有模糊表述（如"近年来""曾经"）
+   
+   temporal_detail（时间信息详细程度）：0/1/2
+   - 0=无时间信息；1=仅有年份或模糊时间；2=有精确日期或时间段（如"2020年7月1日-15日"）
+   
+   extracted_time（从文中提取的时间信息）：
+   - 提取段落中出现的最主要的时间表述，如 "1998年6月-9月"、"2022年8月" 等
+   - 如果没有明确时间，填 ""
+   
+   【空间信息】
+   has_spatial_info（是否包含明确的空间信息）：
+   - true：段落中出现明确的地点：省份、城市、河流、湖泊、水库、流域分区等
+   - false：没有任何地点线索，或只有模糊表述（如"某地""部分地区"）
+   
+   spatial_detail（空间信息详细程度）：0/1/2
+   - 0=无空间信息；1=仅有省级或流域级别；2=有市县级或具体水文站点/水利工程
+   
+   extracted_location（从文中提取的地点信息）：
+   - 提取段落中出现的最主要的地点，用逗号分隔，如 "长江中下游,湖北省,武汉市"
+   - 如果没有明确地点，填 ""
+   
+   【主体信息】（重要！尤其对于法规制度类）
+   has_issuer_info（是否包含明确的发布/责任主体）：
+   - true：段落中出现明确的机构名称，如"国家防汛抗旱总指挥部""水利部""XX省人民政府""长江水利委员会"等
+   - false：没有任何主体信息
+   
+   issuer_detail（主体信息详细程度）：0/1/2
+   - 0=无主体信息；1=仅有泛称（如"有关部门""地方政府"）；2=有明确机构名称
+   
+   extracted_issuer（从文中提取的发布/责任主体）：
+   - 提取段落中出现的主要机构名称，如 "国家防总,水利部,湖北省防汛抗旱指挥部"
+   - 如果没有明确主体，填 ""
+
 【分维度打分】
-请为以下三个维度分别给出 0/1/2 的整数评分：
+请为以下维度分别给出 0/1/2 的整数评分：
 relevance_yangtze：0=完全无关；1=泛水旱灾害相关；2=明确提到长江流域或可直接用于长江场景
 kg_potential：0=几乎没有可抽知识；1=有少量事实/措施；2=有清晰的事件、指标、因果或措施，适合抽取
 cleanliness：0=严重乱码；1=有少量噪声但可读；2=文本规范、句子完整
+temporal_detail：0=无时间信息；1=仅有年份或模糊时间；2=有精确日期或时间段
+spatial_detail：0=无空间信息；1=仅有省级或流域级别；2=有市县级或具体站点
+issuer_detail：0=无主体信息；1=仅有泛称；2=有明确机构名称
 
 【语义主题标签】
-为段落指定一个 topic_label（中文短语即可，可选集合示例）：
-- disaster_event（灾害事件叙述）
-- impact_assessment（影响与损失）
-- measure_response（防治措施/应急响应）
-- institution_regulation（制度/法规/流程）
-- background_analysis（致灾因子/气候背景/统计特征）
+为段落指定一个 topic_label（必须从以下选项中选择）：
+- disaster_event（灾害事件叙述：描述某次具体洪水/干旱事件的发生过程）
+- impact_assessment（影响与损失：描述灾害造成的人员伤亡、经济损失、受灾面积等）
+- measure_response（防治措施/应急响应：描述具体的防汛抗旱行动、抢险救灾、水库调度等）
+- institution_regulation（制度/法规/流程：描述应急预案、职责分工、响应启动条件等规则性内容）
+- background_analysis（致灾因子/气候背景/统计特征：描述降水异常、气候变化、历史统计等）
 - other（其他无法归类）
 
 【总体决策规则（keep_for_eval）】
 
-请根据以上标签，给出最终布尔值 keep_for_eval：
+请根据以上标签，给出最终布尔值 keep_for_eval。
 
-- 只有在下面条件同时满足时，才给 keep_for_eval = true：
+**严格筛选标准**：只有在下面条件**全部满足**时，才给 keep_for_eval = true：
   1) is_water_disaster_domain = true；
-  2) text_quality = "good" 或 "noisy"（不能是 "garbled"）且 cleanliness >= 1；
+  2) text_quality 为 "excellent"、"good" 或 "noisy"（不能是 "garbled"）且 cleanliness >= 1；
   3) contains_event_or_rule = true，且 kg_potential >= 1；
   4) relevance_yangtze >= 1；
+  5) **信息完备性**（按类型区分要求）：
+     - disaster_event / impact_assessment 类型：temporal_detail >= 1 且 spatial_detail >= 1（必须有时间和地点）
+     - institution_regulation 类型：temporal_detail >= 1 或 issuer_detail >= 1（必须有时间或发布主体）
+     - measure_response 类型：temporal_detail >= 1 且 (spatial_detail >= 1 或 issuer_detail >= 1)
+     - background_analysis 类型：temporal_detail >= 1 或 spatial_detail >= 1（至少有时间或空间背景）
+     - other 类型：至少满足 temporal_detail + spatial_detail + issuer_detail >= 2
 
-- 在满足上述 3 个条件的前提下：
-  - 如果 is_yangtze_related = true，通常应该保留；
-  - 如果 is_yangtze_related = false，但内容是通用的水旱灾害制度/规则/方法且对知识图谱有明显价值，也可以保留；
+**偏向保守**：
+  - 如果时间、空间、主体信息都不明确（三者 detail 都为 0），即使其他条件满足，也必须 keep_for_eval = false；
   - 如果你犹豫不决，请偏向 keep_for_eval = false（宁可漏掉，不要把明显不合适的段落收进去）。
 
 【输出要求】
 
 1. 请严格按照下面 JSON 模板输出，不要添加任何额外说明文字或注释。
 2. 所有字段都必须给出；字符串用双引号，布尔用 true/false，小写。
-3. reason 字段用简短中文（不超过 40 字）概括保留/剔除的主要原因。
+3. reason 字段用简短中文（不超过 50 字）概括保留/剔除的主要原因。
 
 JSON 模板如下（请替换成你的判断结果）：
 
@@ -626,7 +674,16 @@ JSON 模板如下（请替换成你的判断结果）：
     "cleanliness": 2,
     "topic_label": "disaster_event",
     "main_topic": "……",
-    "source_guess": "case_paper"
+    "source_guess": "case_paper",
+    "has_temporal_info": true,
+    "has_spatial_info": true,
+    "has_issuer_info": false,
+    "temporal_detail": 2,
+    "spatial_detail": 2,
+    "issuer_detail": 0,
+    "extracted_time": "1998年6月-9月",
+    "extracted_location": "长江中下游,湖北省,武汉市",
+    "extracted_issuer": ""
   }
 }
 
