@@ -6,3 +6,6 @@ __pycache__/
 .env/
 outputs/*/process/
 data/
+data_backup/
+outputs_backup/
+outputs/
