@@ -9,6 +9,7 @@ logging:
   file: ""                                  # 可选日志文件路径，留空则仅输出到控制台
 
 # 路径配置
+# 注意：data/ 和 outputs/ 已通过符号链接指向 /media/data2/YangtzeDestoryLLM/
 paths:
   output_dir: "outputs/cq_pipeline/final"           # P1-P5 主输出目录；被 scripts/run_cq_pipeline.py、p5_from_tbox.py、run_full_evaluation.py 作为默认结果路径。
   p4_corpus_dir: "data/enhancing_onto_corpus_docs"  # P4 文献增强语料目录；被 scripts/p4_enhance_onto.py -> CQLLMPipeline.run_p4_over_corpus 使用。
@@ -17,6 +18,8 @@ paths:
   corpus_full: "data/corpus_for_kg/handle_used_kg_corpus"  # 全库语料（切分后）根目录；tools/filter_corpus_light.py、tools/build_eval_pool.py 读取。
   light_pool: "data/corpus_for_kg/filtered_ytz_corpus/light_pool.jsonl"  # 轻过滤输出 jsonl；tools/filter_corpus_light.py 默认写入。
   eval_pool_dir: "data/corpus_for_kg/eval_pool"                # Eval Pool 输出目录（pool/dev/test）；tools/build_eval_pool.py 使用。
+  models_cache: "/media/data2/YangtzeDestoryLLM/models_cache"  # 预训练模型缓存目录（HuggingFace/SentenceTransformer）
+  logs_archive: "/media/data2/YangtzeDestoryLLM/logs_archive"  # 历史日志归档目录
 
 llm:
   # OpenAI 兼容接口配置（API Key 放 .env）
@@ -44,6 +47,7 @@ llm_per_stage:
 
 embedding:
   model_name: "BAAI/bge-base-zh-v1.5"    # 句向量模型，用于去重与 CQ 覆盖度；被 tools/deduplication.py、tools/cq_coverage.py 使用。
+  cache_folder: "/media/data2/YangtzeDestoryLLM/models_cache"  # 模型缓存路径
 
 filtering:
   light:
@@ -79,9 +83,9 @@ eval_pool:
 p4:
   min_support: 2                         # 聚合建议的最低支持度；scripts/p4_enhance_onto.py -> CQLLMPipeline.run_p4_over_corpus。
   allow_new_classes: false               # 合并时是否允许新增类；同上。
-  align_synonyms: false                  # 是否对建议名称做同义归一；同上，使用 kg.utils.schema_alignment。
-  dedup_with_embeddings: false           # 是否对新增类/关系做向量去重；同上，使用 kg.utils.deduplication。
-  dedup_threshold: 0.8                   # 去重相似度阈值；同上。
+  align_synonyms: true                   # 是否对建议名称做同义归一；同上，使用 kg.utils.schema_alignment。【已启用，与论文对齐】
+  dedup_with_embeddings: true            # 是否对新增类/关系做向量去重；同上，使用 kg.utils.deduplication。【已启用，与论文对齐】
+  dedup_threshold: 0.7                   # 去重相似度阈值；同上。【调整为0.7，与论文一致】
 
 # P5配置
 p5:
@@ -90,7 +94,107 @@ p5:
   min_chars: 800                         # P5 分段最小长度（文本切分）；p5_from_tbox.py 使用。
   max_chars: 2500                        # P5 分段最大长度（文本切分）；p5_from_tbox.py 使用。
 
-# 去重配置
+# 去重配置（与论文Stage 2对齐）
 dedup_schema:
-  enabled: false                         # 在 P2/P3 后对类/关系做模式去重；run_cq_pipeline.py 使用 pipeline.deduplicate_tbox。
-  threshold: 0.75                        # 去重相似度阈值；同上。
+  enabled: true                          # 在 P2/P3 后对类/关系做模式去重；run_cq_pipeline.py 使用 pipeline.deduplicate_tbox。【已启用】
+  threshold: 0.7                         # 去重相似度阈值；同上。【调整为0.7，与论文一致】
+
+# 语料三分法配置（P4/P5/EVAL）
+# 用于 tools/build_manifest.py 和 filters/apply_manifest.py
+corpus_split:
+  # ========== P4 配置（本体增强）==========
+  # P4 倾向的来源类型（概念性：定义、规则、制度）
+  p4_sources:
+    - emergency_plan
+    - regulation
+    - technical_guideline
+    - gazette_yearbook
+    - law_plan            # filter_labels.source_guess 中的值
+  
+  # P4 优选的 topic_label
+  p4_topic_labels:
+    - institution_regulation
+    - backgroundanalysis
+    - background_analysis
+  
+  # P4 概念性标志词（增强版）
+  p4_keywords:
+    - "是指"
+    - "定义为"
+    - "系指"
+    - "包括以下"
+    - "分为以下"
+    - "具体包括"
+    - "按照.*规定"
+    - "依据.*标准"
+    - "响应级别"
+    - "预案启动"
+    - "应急响应"
+    - "原则"
+    - "职责"
+    - "流程"
+    - "标准"
+    - "指标"
+    - "术语"
+  
+  # P4 最低概念得分阈值（得分 >= 此值且实例得分=0 才标 P4）
+  p4_min_score: 3
+  
+  # ========== EVAL 配置（评测）==========
+  # EVAL 倾向的来源类型
+  eval_sources:
+    - news
+    - case_study
+    - news_popular
+  
+  # EVAL 倾向的主题标签
+  eval_topic_labels:
+    - disasterevent
+    - disaster_event
+    - impact_assessment
+  
+  # 实例性标志（事件事实，增强版）
+  instance_patterns:
+    - '\d{4}年\d{1,2}月\d{1,2}日'
+    - '\d{4}年\d{1,2}月'
+    - '\d+(\.\d+)?[万亿]?(?:人|亩|元|吨|公顷|平方公里)'
+    - '洪峰流量.*?m[³3]/s'
+    - '经济损失.*?[万亿]?元'
+    - '受灾面积.*?(?:平方公里|km²|hm²|万亩)'
+    - '超警\d+天'
+    - '水位.*?\d+(\.\d+)?m'
+    - '死亡\d+人'
+    - '转移\d+[万]?人'
+  
+  # EVAL 分层抽样目标（按 topic_label）
+  eval_stratify_targets:
+    disasterevent: 150
+    disaster_event: 150
+    measure_response: 180
+    backgroundanalysis: 50
+    background_analysis: 50
+    institution_regulation: 50
+    impact_assessment: 10
+  
+  # EVAL 总量上限（设为 null 表示不限制）
+  eval_max_count: 500
+  
+  # EVAL 抽样比例（当不使用分层目标时）
+  eval_sample_ratio: 0.3
+  
+  # ========== 时间隔离（可选）==========
+  p4_year_max: null      # 如 2016，年份 <= 此值的概念性语料优先标 P4
+  eval_year_min: null    # 如 2017，年份 >= 此值的实例性语料优先标 EVAL
+  
+  # ========== 拆分配置 ==========
+  eval_dev_ratio: 0.6
+  seed: 42
+  
+  # ========== 输出路径配置 ==========
+  output_paths:
+    manifest: "data/manifests/purpose_manifest.jsonl"
+    p4_corpus: "data/corpus_for_onto/p4_only.jsonl"
+    p5_corpus: "data/corpus_for_kg/p5_only.jsonl"
+    eval_pool: "data/p5_eval_pool/pool.jsonl"
+    eval_dev: "data/p5_eval_pool/dev.jsonl"
+    eval_test: "data/p5_eval_pool/test.jsonl"
