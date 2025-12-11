@@ -198,3 +198,24 @@ corpus_split:
     eval_pool: "data/p5_eval_pool/pool.jsonl"
     eval_dev: "data/p5_eval_pool/dev.jsonl"
     eval_test: "data/p5_eval_pool/test.jsonl"
+
+# TBox 去重配置（P2 阶段 Embedding 去重）
+tbox_dedup:
+  model: "BAAI/bge-base-zh-v1.5"   # SentenceTransformer 模型名称
+  sim_th: 0.7                      # 相似度阈值（>= 此值判定为重复并剔除）
+  review_band: [0.6, 0.7]          # 预留：人工审核区间（当前版本仅做自动去重，不使用）
+  batch_size: 32                   # 预留：Embedding 计算批大小（当前由底层模型控制）
+  normalize_embeddings: true       # 预留：是否归一化 embedding
+  dedup_base: false                # 是否对 base_tbox 内部也做一次去重
+
+  # 元素文本拼接配置（当前主要用于 review 展示）
+  text_template:
+    class: "{name} || {cn_name} || def:{definition} || examples:{examples}"
+    relation: "{name} || {cn_name} || {domain}->{range} || def:{definition}"
+    attribute: "{owner}.{name} || {cn_name} || type:{value_type}"
+
+  # 输出配置
+  output:
+    save_embeddings: false         # 预留：是否保存 embedding 向量（当前未使用）
+    review_csv_encoding: "utf-8"  # review.csv 编码
+
