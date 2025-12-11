@@ -9,3 +9,5 @@ data/
 data_backup/
 outputs_backup/
 outputs/
+logs/
+*.log
