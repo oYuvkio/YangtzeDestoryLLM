@@ -36,37 +36,105 @@ class CQCoverageEvaluator:
             return str(item.get("question", "") or item.get("text", "")).strip()
         return str(item).strip()
 
-    def _build_tbox_texts(self, tbox: Dict[str, Any]) -> List[str]:
-        """将 TBox 类/关系/属性转为富语义文本，用于向量化。"""
+    def _build_tbox_texts(
+        self,
+        tbox: Dict[str, Any],
+        *,
+        text_mode: str = "full",
+        include_relations: bool = True,
+        include_attributes: bool = True,
+        include_parent: bool = True,
+        include_relation_signature: bool = True,
+        include_attribute_owner_type: bool = True,
+    ) -> List[str]:
+        """
+        将 TBox 类/关系/属性转为文本，用于向量化。
+
+        Args:
+            text_mode:
+              - "label": 仅标签（cn_name/name）
+              - "definition": 仅定义（definition）
+              - "label+definition": 标签+定义
+              - "full": 保持向后兼容的“富语义”表示（默认）
+            include_relations: 是否纳入 relations
+            include_attributes: 是否纳入 attributes
+            include_parent: 类文本中是否附带 parent（full 默认开启）
+            include_relation_signature: 关系文本中是否附带 domain→range（full 默认开启）
+            include_attribute_owner_type: 属性文本中是否附带 owner/type（full 默认开启）
+        """
+
+        mode = (text_mode or "full").strip().lower()
+        if mode not in {"label", "definition", "label+definition", "full"}:
+            mode = "full"
+
+        def build_label(name: str, cn_name: str) -> str:
+            if cn_name and name:
+                return f"{cn_name}（{name}）"
+            return cn_name or name
+
         texts: List[str] = []
         for c in tbox.get("classes", []) or []:
             name = c.get("name", "")
             cn_name = c.get("cn_name", "")
             definition = c.get("definition", "")
             parent = c.get("parent") or c.get("parent_class") or ""
-            parent_part = f" [parent={parent}]" if parent else ""
-            text = f"{cn_name}（{name}）: {definition}{parent_part}".strip()
-            if text and text != ": ":
+            label = build_label(name, cn_name)
+
+            if mode == "label":
+                text = label
+            elif mode == "definition":
+                text = definition
+            elif mode == "label+definition":
+                text = f"{label}: {definition}".strip(": ").strip()
+            else:
+                parent_part = f" [parent={parent}]" if (include_parent and parent) else ""
+                text = f"{label}: {definition}{parent_part}".strip()
+
+            if text and text.strip() and text.strip() != ":":
                 texts.append(text)
 
-        for r in tbox.get("relations", []) or []:
-            name = r.get("name", "")
-            cn_name = r.get("cn_name", "")
-            definition = r.get("definition", "")
-            domain = r.get("domain", "")
-            range_ = r.get("range", "")
-            text = f"{cn_name}（{name}）: {definition} [{domain}→{range_}]".strip()
-            if text and text != ": ":
-                texts.append(text)
+        if include_relations:
+            for r in tbox.get("relations", []) or []:
+                name = r.get("name", "")
+                cn_name = r.get("cn_name", "")
+                definition = r.get("definition", "")
+                domain = r.get("domain", "")
+                range_ = r.get("range", "")
+                label = build_label(name, cn_name)
 
-        for a in tbox.get("attributes", []) or []:
-            owner = a.get("owner", "")
-            name = a.get("name", "")
-            cn_name = a.get("cn_name", "")
-            vtype = a.get("value_type", "")
-            text = f"{cn_name}（{name}）: owner={owner}, type={vtype}".strip()
-            if text and text != ": ":
-                texts.append(text)
+                if mode == "label":
+                    text = label
+                elif mode == "definition":
+                    text = definition
+                elif mode == "label+definition":
+                    text = f"{label}: {definition}".strip(": ").strip()
+                else:
+                    sig = f" [{domain}→{range_}]" if (include_relation_signature and (domain or range_)) else ""
+                    text = f"{label}: {definition}{sig}".strip()
+
+                if text and text.strip() and text.strip() != ":":
+                    texts.append(text)
+
+        if include_attributes:
+            for a in tbox.get("attributes", []) or []:
+                owner = a.get("owner", "")
+                name = a.get("name", "")
+                cn_name = a.get("cn_name", "")
+                vtype = a.get("value_type", "")
+                label = build_label(name, cn_name)
+
+                if mode == "label":
+                    text = label
+                elif mode == "definition":
+                    text = ""
+                elif mode == "label+definition":
+                    text = label
+                else:
+                    suffix = f": owner={owner}, type={vtype}" if include_attribute_owner_type else ""
+                    text = f"{label}{suffix}".strip()
+
+                if text and text.strip() and text.strip() != ":":
+                    texts.append(text)
         return texts
 
     def evaluate(
@@ -74,6 +142,13 @@ class CQCoverageEvaluator:
         test_cqs: Any,
         tbox: Dict[str, Any],
         thresholds: Optional[List[float]] = None,
+        *,
+        text_mode: str = "full",
+        include_relations: bool = True,
+        include_attributes: bool = True,
+        include_parent: bool = True,
+        include_relation_signature: bool = True,
+        include_attribute_owner_type: bool = True,
     ) -> Dict[float, Dict[str, Any]]:
         """
         评估 TBox 对测试 CQ 的覆盖度。
@@ -93,7 +168,15 @@ class CQCoverageEvaluator:
 
         questions = [self._extract_question(cq) for cq in test_cqs if self._extract_question(cq)]
 
-        tbox_texts = self._build_tbox_texts(tbox)
+        tbox_texts = self._build_tbox_texts(
+            tbox,
+            text_mode=text_mode,
+            include_relations=include_relations,
+            include_attributes=include_attributes,
+            include_parent=include_parent,
+            include_relation_signature=include_relation_signature,
+            include_attribute_owner_type=include_attribute_owner_type,
+        )
         if not tbox_texts or not questions:
             return {
                 t: {

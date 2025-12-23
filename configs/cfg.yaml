@@ -15,22 +15,26 @@ paths:
   p4_corpus_dir: "data/enhancing_onto_corpus_docs"  # P4 文献增强语料目录；被 scripts/p4_enhance_onto.py -> CQLLMPipeline.run_p4_over_corpus 使用。
   p4_process_dir: "outputs/cq_pipeline/process"     # P4 中间文件（per-doc 建议、聚合）输出目录；scripts/p4_enhance_onto.py 使用。
   p4_final_dir: "outputs/cq_pipeline/final"         # P4 增强 TBox 输出目录；scripts/p4_enhance_onto.py 写入多版 TBox。
-  corpus_full: "data/corpus_for_kg/handle_used_kg_corpus"  # 全库语料（切分后）根目录；tools/filter_corpus_light.py、tools/build_eval_pool.py 读取。
+  corpus_full: "data/corpus_for_kg/handled_used_kg_corpus"  # 全库语料（切分后）根目录；tools/filter_corpus_light.py、tools/build_eval_pool.py 读取。
   light_pool: "data/corpus_for_kg/filtered_ytz_corpus/light_pool.jsonl"  # 轻过滤输出 jsonl；tools/filter_corpus_light.py 默认写入。
-  eval_pool_dir: "data/corpus_for_kg/eval_pool"                # Eval Pool 输出目录（pool/dev/test）；tools/build_eval_pool.py 使用。
+  eval_pool_dir: "data/p5_eval_pool"                # Eval Pool 输出目录（pool/dev/test）；tools/build_eval_pool.py 使用。
   models_cache: "/media/data2/YangtzeDestoryLLM/models_cache"  # 预训练模型缓存目录（HuggingFace/SentenceTransformer）
   logs_archive: "/media/data2/YangtzeDestoryLLM/logs_archive"  # 历史日志归档目录
 
 llm:
   # OpenAI 兼容接口配置（API Key 放 .env）
   # 注：LongCat 的 OpenAI 兼容端点是 /openai/v1，代码会自动补全
-  base_url: "https://api.longcat.chat/openai/v1"   # API 地址（已补全路径）
-  model_name: "LongCat-Flash-Thinking"               # 模型名称
+  base_url: https://api.longcat.chat/openai/v1
+  #"https://api.longcat.chat/openai/v1"   # API 地址（已补全路径）
+  model_name: LongCat-Flash-Chat
+  #"LongCat-Flash-Chat"               # 模型名称
   temperature: 0.1                        # 温度参数
-  max_retries: 3                          # 重试次数
-  timeout: 60                             # 超时时间（秒）
-  max_tokens: 8192                        # LongCat 默认需要指定
-  enable_thinking: true                  # 是否启用思考模式（需使用 LongCat-Flash-Thinking 模型）
+  max_retries: 2                          # 重试次数
+  timeout: 180                             # 超时时间（秒）
+  #max_tokens: 8192                        # LongCat 默认需要指定
+  #enable_thinking: false                  # 是否启用思考模式（需使用 LongCat-Flash-Thinking 模型）
+  request_mode: post
+  #disable_response_format: true    # 是否禁用响应格式检查（部分模型可能不支持）
 
 # 分阶段 LLM 配置（可选，不配置则使用上面的默认配置）
 llm_per_stage:
@@ -81,6 +85,9 @@ eval_pool:
 
 # P4配置
 p4:
+  sleep_between_calls: false              # 是否在每次 LLM 调用后随机休眠（避免限流）
+  sleep_min_sec: 2                      # 休眠下限秒数
+  sleep_max_sec: 5                      # 休眠上限秒数
   min_support: 2                         # 聚合建议的最低支持度；scripts/p4_enhance_onto.py -> CQLLMPipeline.run_p4_over_corpus。
   allow_new_classes: false               # 合并时是否允许新增类；同上。
   align_synonyms: true                   # 是否对建议名称做同义归一；同上，使用 kg.utils.schema_alignment。【已启用，与论文对齐】
@@ -203,6 +210,7 @@ corpus_split:
 tbox_dedup:
   model: "BAAI/bge-base-zh-v1.5"   # SentenceTransformer 模型名称
   sim_th: 0.7                      # 相似度阈值（>= 此值判定为重复并剔除）
+  
   review_band: [0.6, 0.7]          # 预留：人工审核区间（当前版本仅做自动去重，不使用）
   batch_size: 32                   # 预留：Embedding 计算批大小（当前由底层模型控制）
   normalize_embeddings: true       # 预留：是否归一化 embedding
@@ -218,4 +226,3 @@ tbox_dedup:
   output:
     save_embeddings: false         # 预留：是否保存 embedding 向量（当前未使用）
     review_csv_encoding: "utf-8"  # review.csv 编码
-

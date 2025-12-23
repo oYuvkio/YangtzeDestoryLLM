@@ -33,8 +33,8 @@
 ```bash
 # 基础用法
 python tools/filter_corpus_light.py \
-    --root data/corpus_for_kg/handled_all_kg_corpus \
-    --out data/corpus_for_kg/p5_corpus_filtered/light_pool.jsonl
+    --root data/corpus_for_kg/handled_used_kg_corpus \
+    --out data/corpus_for_kg/filtered_ytz_corpus/light_pool.jsonl
 
 # 使用特定 LLM 配置
 python tools/filter_corpus_light.py \
@@ -81,7 +81,12 @@ from typing import (
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 
-import yaml
+try:
+    import yaml  # type: ignore
+    YAML_AVAILABLE = True
+except ImportError:
+    yaml = None  # type: ignore[assignment]
+    YAML_AVAILABLE = False
 
 # ==============================================================================
 # 项目路径配置
@@ -1609,6 +1614,7 @@ class FilterPipeline:
         keep = self._check_keep(cached)
 
         segment.filter_labels = cached.get("labels", {})
+        self._fill_source_type_from_labels(segment)
         segment.filter_reason = cached.get("reason", "cached")
 
         if keep:
@@ -1629,6 +1635,7 @@ class FilterPipeline:
         keep = self._check_keep(decision)
 
         segment.filter_labels = decision.get("labels", {})
+        self._fill_source_type_from_labels(segment)
         segment.filter_reason = decision.get("reason", "")
 
         if keep:
@@ -1641,6 +1648,35 @@ class FilterPipeline:
             logger.debug(f"[LLM] DROP {segment.id}: {segment.filter_reason}")
 
         return keep
+
+    def _fill_source_type_from_labels(self, segment: Segment) -> None:
+        """
+        用 LLM 标签补全 `source_type`（若元数据缺失）。
+
+        背景：
+        - 上游 `corpus_cleaner`/OCR 产出的 `.meta.json` 未必包含 source_type；
+        - `build_manifest.py` 会回退读取 `filter_labels.source_guess`，但导出的 JSONL 顶层 `source_type` 仍可能为空，
+          不利于后续做分布统计/分层抽样（例如写论文时的语料来源分布表）。
+
+        约束：
+        - 仅在 `segment.source_type` 为空时补全，避免覆盖人工/规则提取的值。
+        """
+        if segment.source_type:
+            return
+
+        labels = segment.filter_labels or {}
+        if not isinstance(labels, dict):
+            return
+
+        guess = labels.get("source_guess") or labels.get("source_type")
+        if not guess:
+            return
+
+        try:
+            segment.source_type = str(guess).strip()
+        except Exception:
+            # 极端情况下不影响主流程
+            return
 
     def _check_keep(self, decision: Dict[str, Any]) -> bool:
         """
@@ -1700,12 +1736,15 @@ class ConfigLoader:
     @staticmethod
     def load_from_yaml(path: Path) -> Dict[str, Any]:
         """加载 YAML 配置文件"""
+        if not YAML_AVAILABLE:
+            logger.warning("未安装 PyYAML，无法加载配置文件（将使用默认值/命令行参数）")
+            return {}
         if not path.exists():
             return {}
 
         try:
             content = path.read_text(encoding="utf-8")
-            data = yaml.safe_load(content)
+            data = yaml.safe_load(content)  # type: ignore[union-attr]
             return data if isinstance(data, dict) else {}
         except Exception as e:
             logger.warning(f"加载配置文件失败: {e}")
@@ -1836,8 +1875,8 @@ def create_argument_parser() -> argparse.ArgumentParser:
 使用示例
 基础用法
 python tools/filter_corpus_light.py \
-  --root data/corpus_for_kg/handled_all_kg_corpus \
-  --out data/corpus_for_kg/p5_corpus_filtered/light_pool.jsonl
+  --root data/corpus_for_kg/handled_used_kg_corpus \
+  --out data/corpus_for_kg/filtered_ytz_corpus/light_pool.jsonl
 
 使用特定 LLM
 python tools/filter_corpus_light.py \
@@ -1867,7 +1906,7 @@ python tools/filter_corpus_light.py \
     io_group.add_argument(
         "--out",
         "-o",
-        default="data/corpus_for_kg/p5_corpus_filtered/light_pool.jsonl",
+        default="data/corpus_for_kg/filtered_ytz_corpus/light_pool.jsonl",
         help="过滤后输出文件路径",
     )
     io_group.add_argument(

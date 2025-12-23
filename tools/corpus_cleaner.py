@@ -80,6 +80,7 @@ from __future__ import annotations
 # 标准库导入
 # ==============================================================================
 import argparse
+import html
 import hashlib
 import json
 import logging
@@ -2216,6 +2217,66 @@ class MarkdownExtractor(BaseTextExtractor):
         re.MULTILINE
     )
 
+    # HTML 相关模式：Paddle OCR 产出的 Markdown 常混入 HTML 表格/换行标签
+    _HTML_COMMENT_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<!--.*?-->',
+        re.DOTALL
+    )
+    _HTML_BR_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<\s*br\s*/?\s*>',
+        re.IGNORECASE
+    )
+    _HTML_HR_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<\s*hr\s*/?\s*>',
+        re.IGNORECASE
+    )
+
+    # HTML 表格相关标签：保留内容，去除结构标签，并转换为可读文本
+    _HTML_TABLE_OPEN_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<\s*table\b[^>]*>',
+        re.IGNORECASE
+    )
+    _HTML_TABLE_CLOSE_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<\s*/\s*table\s*>',
+        re.IGNORECASE
+    )
+    _HTML_TR_OPEN_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<\s*tr\b[^>]*>',
+        re.IGNORECASE
+    )
+    _HTML_TR_CLOSE_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<\s*/\s*tr\s*>',
+        re.IGNORECASE
+    )
+    _HTML_CELL_OPEN_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<\s*(?:td|th)\b[^>]*>',
+        re.IGNORECASE
+    )
+    _HTML_CELL_CLOSE_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<\s*/\s*(?:td|th)\s*>',
+        re.IGNORECASE
+    )
+    _HTML_TABLE_SECTION_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<\s*/?\s*(?:thead|tbody|tfoot|colgroup|col)\b[^>]*>',
+        re.IGNORECASE
+    )
+
+    # 常见块级标签：替换为换行，保留其内部文本
+    _HTML_BLOCK_TAG_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<\s*/?\s*(?:div|p|section|article|header|footer|center)\b[^>]*>',
+        re.IGNORECASE
+    )
+    # 常见行内标签：直接移除，保留其内部文本
+    _HTML_INLINE_TAG_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<\s*/?\s*(?:span|font|b|i|u|strong|em|sup|sub|a)\b[^>]*>',
+        re.IGNORECASE
+    )
+    # 图片标签：直接移除（OCR 图片已无效/不需要）
+    _HTML_IMG_TAG_PATTERN: ClassVar[re.Pattern] = re.compile(
+        r'<\s*img\b[^>]*>',
+        re.IGNORECASE
+    )
+
     def supports(self, file_type: FileType) -> bool:
         """检查是否支持指定文件类型。"""
         return file_type == FileType.MARKDOWN
@@ -2288,14 +2349,15 @@ class MarkdownExtractor(BaseTextExtractor):
 
         按顺序处理各种 Markdown 元素：
         1. 保护代码块（避免内容被其他规则误处理）
-        2. 处理表格
-        3. 转换标题
-        4. 移除分隔线
-        5. 处理引用块
-        6. 处理列表
-        7. 处理链接和图片
-        8. 移除样式标记
-        9. 还原代码块
+        2. 处理 HTML 标签/表格（OCR 输出常混入）
+        3. 处理表格
+        4. 转换标题
+        5. 移除分隔线
+        6. 处理引用块
+        7. 处理列表
+        8. 处理链接和图片
+        9. 移除样式标记
+        10. 还原代码块
         """
         # 第 1 步：保护代码块，用占位符替换
         code_blocks: List[str] = []
@@ -2307,29 +2369,32 @@ class MarkdownExtractor(BaseTextExtractor):
 
         text = self._CODE_BLOCK_PATTERN.sub(_protect_code_block, content)
 
-        # 第 2 步：处理表格
+        # 第 2 步：处理 HTML 标签/表格（Paddle OCR 输出常用 HTML 表格表示）
+        text = self._convert_html_to_text(text)
+
+        # 第 3 步：处理表格
         text = self._process_tables(text)
 
-        # 第 3 步：转换标题（保留层级信息）
+        # 第 4 步：转换标题（保留层级信息）
         text = self._convert_headings(text)
 
-        # 第 4 步：移除分隔线
+        # 第 5 步：移除分隔线
         text = self._HORIZONTAL_RULE_PATTERN.sub('\n', text)
 
-        # 第 5 步：处理引用块（移除 > 前缀）
+        # 第 6 步：处理引用块（移除 > 前缀）
         text = self._BLOCKQUOTE_PATTERN.sub('', text)
 
-        # 第 6 步：处理列表（统一格式）
+        # 第 7 步：处理列表（统一格式）
         text = self._UNORDERED_LIST_PATTERN.sub(r'\1• ', text)
         text = self._ORDERED_LIST_PATTERN.sub(r'\1• ', text)
 
-        # 第 7 步：处理链接和图片
+        # 第 8 步：处理链接和图片
         text = self._IMAGE_PATTERN.sub(r'[图片: \1]', text)
         text = self._LINK_PATTERN.sub(
             lambda m: m.group(1) or m.group(2) or '', text
         )
 
-        # 第 8 步：移除样式标记
+        # 第 9 步：移除样式标记
         text = self._BOLD_PATTERN.sub(
             lambda m: m.group(1) or m.group(2) or '', text
         )
@@ -2338,7 +2403,7 @@ class MarkdownExtractor(BaseTextExtractor):
         )
         text = self._INLINE_CODE_PATTERN.sub(r'\1', text)
 
-        # 第 9 步：还原代码块
+        # 第 10 步：还原代码块
         for i, code in enumerate(code_blocks):
             placeholder = f"[CODE_BLOCK_{i}]"
             text = text.replace(
@@ -2346,6 +2411,103 @@ class MarkdownExtractor(BaseTextExtractor):
             )
 
         return text
+
+    def _convert_html_to_text(self, text: str) -> str:
+        """
+        将 Markdown 中混入的 HTML（主要是表格/换行/布局标签）转换为可读文本。
+
+        背景：
+        - Paddle OCR 输出的 .md 往往包含 `<div>...</div>`、`<table>...</table>` 等 HTML。
+        - 直接进入下游清洗/切分会残留大量标签噪声，影响语料质量与关键词检索。
+
+        处理策略：
+        - 仅处理常见/明确的 HTML 标签集合，避免误伤 Markdown 的 `<https://...>` 自动链接写法。
+        - 表格保留内容：将 td/th 转换为 ` | ` 分隔，tr 转换为换行，并包裹 `[表格]...[/表格]`。
+        """
+        if "<" not in text or ">" not in text:
+            return text
+
+        converted = text
+
+        # 1) 移除 HTML 注释
+        converted = self._HTML_COMMENT_PATTERN.sub("", converted)
+
+        # 2) 换行/分隔标签
+        converted = self._HTML_BR_PATTERN.sub("\n", converted)
+        converted = self._HTML_HR_PATTERN.sub("\n", converted)
+
+        # 3) 表格标签：保留内容并结构化为可读文本
+        converted = self._HTML_TABLE_OPEN_PATTERN.sub("\n[表格]\n", converted)
+        converted = self._HTML_TABLE_CLOSE_PATTERN.sub("\n[/表格]\n", converted)
+        converted = self._HTML_TR_OPEN_PATTERN.sub("\n", converted)
+        converted = self._HTML_TR_CLOSE_PATTERN.sub("\n", converted)
+        converted = self._HTML_TABLE_SECTION_PATTERN.sub("", converted)
+        converted = self._HTML_CELL_OPEN_PATTERN.sub("", converted)
+        converted = self._HTML_CELL_CLOSE_PATTERN.sub(" | ", converted)
+
+        # 4) 其他常见标签
+        converted = self._HTML_IMG_TAG_PATTERN.sub("", converted)
+        converted = self._HTML_BLOCK_TAG_PATTERN.sub("\n", converted)
+        converted = self._HTML_INLINE_TAG_PATTERN.sub("", converted)
+
+        # 5) HTML 实体反转义：&lt; &gt; &nbsp; 等
+        try:
+            converted = html.unescape(converted)
+        except Exception:
+            # 极端情况下不影响主流程
+            pass
+
+        # 6) 规范化表格行（去掉行首/行尾多余分隔符，合并空白）
+        converted = self._normalize_converted_html_table(converted)
+        return converted
+
+    @staticmethod
+    def _normalize_converted_html_table(text: str) -> str:
+        """
+        对 HTML 表格转换后的文本做二次清理。
+
+        - 仅在 `[表格]...[/表格]` 区间内处理；
+        - 将 `a|b|c` 统一为 `a | b | c`；
+        - 去除行首/行尾空单元格导致的多余分隔符。
+        """
+        lines = text.splitlines()
+        result_lines: List[str] = []
+        in_table = False
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped == "[表格]":
+                in_table = True
+                result_lines.append("[表格]")
+                continue
+            if stripped == "[/表格]":
+                in_table = False
+                result_lines.append("[/表格]")
+                continue
+
+            if not in_table:
+                result_lines.append(line)
+                continue
+
+            # 表格内部：跳过空行
+            if not stripped:
+                continue
+
+            # 统一分隔符两侧空白
+            normalized = re.sub(r"\s*\|\s*", " | ", stripped)
+
+            # 切分并清理单元格
+            parts = [p.strip() for p in normalized.split("|")]
+            while parts and not parts[0]:
+                parts.pop(0)
+            while parts and not parts[-1]:
+                parts.pop()
+            if not parts:
+                continue
+
+            result_lines.append(" | ".join(parts))
+
+        return "\n".join(result_lines)
 
     def _convert_headings(self, text: str) -> str:
         """转换 Markdown 标题为标准格式，便于后续切分器识别章节边界。"""
@@ -2436,15 +2598,14 @@ class ExtractorFactory:
         self._init_extractors()
 
     def _init_extractors(self) -> None:
-        """初始化所有提取器"""
+        """初始化所有提取器（延迟初始化 PDF 提取器）"""
         # TXT 提取器
         self._extractors[FileType.TXT] = TxtExtractor()
 
         # Markdown 提取器
         self._extractors[FileType.MARKDOWN] = MarkdownExtractor()
 
-        # PDF 提取器（根据配置选择）
-        self._extractors[FileType.PDF] = self._create_pdf_extractor()
+        # PDF 提取器延迟到实际使用时创建（避免强制依赖）
 
     def _create_pdf_extractor(self) -> BaseTextExtractor:
         """创建 PDF 提取器"""
@@ -2475,7 +2636,11 @@ class ExtractorFactory:
                 )
 
     def get_extractor(self, file_type: FileType) -> Optional[BaseTextExtractor]:
-        """获取指定文件类型的提取器"""
+        """获取指定文件类型的提取器（延迟初始化 PDF 提取器）"""
+        # 如果是 PDF 且尚未创建，则延迟创建
+        if file_type == FileType.PDF and file_type not in self._extractors:
+            self._extractors[FileType.PDF] = self._create_pdf_extractor()
+        
         return self._extractors.get(file_type)
 
     def extract(self, path: Path) -> str:
@@ -2545,24 +2710,53 @@ class PatternRegistry:
 
     # 目录相关模式
     TOC_TITLE_PATTERNS: ClassVar[List[re.Pattern]] = [
-        re.compile(r"^目\s*录\s*$"),
-        re.compile(r"^CONTENTS?\s*$", re.IGNORECASE),
-        re.compile(r"^TABLE\s+OF\s+CONTENTS?\s*$", re.IGNORECASE),
+        # MarkdownExtractor 会将标题转换为 `[二级标题] 目录` 之类的标记，因此需兼容可选标题前缀
+        re.compile(r"^\s*(?:\[[一二三四五六]级标题\]\s*)?目\s*录\s*[:：]?\s*$"),
+        re.compile(r"^\s*(?:\[[一二三四五六]级标题\]\s*)?CONTENTS?\s*[:：]?\s*$", re.IGNORECASE),
+        re.compile(
+            r"^\s*(?:\[[一二三四五六]级标题\]\s*)?TABLE\s+OF\s+CONTENTS?\s*[:：]?\s*$",
+            re.IGNORECASE,
+        ),
     ]
 
     TOC_ENTRY_PATTERNS: ClassVar[List[re.Pattern]] = [
         re.compile(r"^[\d一二三四五六七八九十]+[、.．]\s*.{2,40}\s*[\.…·]+\s*\d+\s*$"),
         re.compile(r"^第[一二三四五六七八九十\d]+[章节]\s*.{2,30}\s*[\.…·]+\s*\d+\s*$"),
+        # 无编号目录项：如 `参考文献.....71` / `摘要……1`
+        re.compile(r"^\s*[^\\s].{1,80}?[\\.．…·]{2,}\s*\d+\s*$"),
     ]
 
     # 参考文献起始标志
     REFERENCE_START_PATTERNS: ClassVar[List[re.Pattern]] = [
-        re.compile(r"^参\s*考\s*文\s*献\s*$", re.MULTILINE),
-        re.compile(r"^References?\s*$", re.MULTILINE | re.IGNORECASE),
-        re.compile(r"^REFERENCES?\s*$", re.MULTILINE),
-        re.compile(r"^引用文献\s*$", re.MULTILINE),
-        re.compile(r"^Bibliography\s*$", re.MULTILINE | re.IGNORECASE),
-        re.compile(r"^文献\s*$", re.MULTILINE),
+        # 常见中文写法：可能带标题标记、编号、括号说明、冒号等
+        # - [二级标题] 参考文献:
+        # - [二级标题] 4 参考文献
+        # - [二级标题] 参考文献(References):
+        # - [二级标题] [参考文献]:
+        re.compile(
+            r"^\s*"
+            r"(?:\[[一二三四五六]级标题\]\s*)?"
+            r"(?:\d+(?:\.\d+)*\s*)?"
+            r"[\[【]?\s*参\s*考\s*文\s*献\s*[\]】]?"
+            r"\s*(?:\([^)\n]{0,80}\))?\s*[:：]?\s*$",
+            re.MULTILINE | re.IGNORECASE,
+        ),
+        re.compile(
+            r"^\s*"
+            r"(?:\[[一二三四五六]级标题\]\s*)?"
+            r"(?:\d+(?:\.\d+)*\s*)?"
+            r"[\[【]?\s*引\s*用\s*文\s*献\s*[\]】]?"
+            r"\s*(?:\([^)\n]{0,80}\))?\s*[:：]?\s*$",
+            re.MULTILINE | re.IGNORECASE,
+        ),
+        # 英文写法：可能带标题标记/编号/冒号
+        re.compile(
+            r"^\s*"
+            r"(?:\[[一二三四五六]级标题\]\s*)?"
+            r"(?:\d+(?:\.\d+)*\s*)?"
+            r"(?:References?|Bibliography)\s*[:：]?\s*$",
+            re.MULTILINE | re.IGNORECASE,
+        ),
     ]
 
     # 噪声模式（需要删除的内容）
@@ -2807,9 +3001,52 @@ class TextCleaner:
 
     def _remove_noise(self, text: str) -> str:
         """去除各种噪声模式"""
+        # 先移除 MarkdownExtractor 输出的整块表格（通常是 OCR 的 HTML/Markdown 表格转写）
+        text = self._remove_table_blocks(text)
         for pattern in PatternRegistry.NOISE_PATTERNS:
             text = pattern.sub("", text)
         return text
+
+    @staticmethod
+    def _remove_table_blocks(text: str) -> str:
+        """
+        移除 `[表格]...[/表格]` 整块内容。
+
+        Paddle OCR 产出的 Markdown 常把 HTML/Markdown 表格转成该标记块；
+        对多数下游任务（KG 抽取、LLM 清洗/切分）而言，表格往往是噪声或会显著拉低文本质量。
+
+        采用逐行状态机，避免 DOTALL 正则在大表格上的性能/回溯风险。
+        """
+        if "[表格]" not in text:
+            return text
+
+        lines = text.splitlines()
+
+        # 保护：如果出现孤立的 "[表格]"（后续没有任何 "[/表格]"），不应误删正文到文件末尾。
+        has_future_close = False
+        close_after: List[bool] = [False] * len(lines)
+        for i in range(len(lines) - 1, -1, -1):
+            if lines[i].strip() == "[/表格]":
+                has_future_close = True
+            close_after[i] = has_future_close
+
+        out_lines: List[str] = []
+        in_table = False
+
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped == "[表格]":
+                if close_after[idx]:
+                    in_table = True
+                continue
+            if stripped == "[/表格]":
+                in_table = False
+                continue
+            if in_table:
+                continue
+            out_lines.append(line)
+
+        return "\n".join(out_lines)
 
     def _normalize_final(self, text: str) -> str:
         """最终规范化"""
@@ -5704,20 +5941,6 @@ def save_segments_jsonl(segments: List[Segment], output_path: Path) -> None:
 
 # ==============================================================================
 # 主入口
-# ==============================================================================
-
-
-def main() -> int:
-    """
-    主入口函数。
-    Returns:
-        退出码
-    """
-    return run_cli()
-
-
-if __name__ == "__main__":
-    sys.exit(main())
 # ==============================================================================
 
 

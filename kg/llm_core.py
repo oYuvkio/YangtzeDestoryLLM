@@ -19,6 +19,7 @@
 - 线程安全：支持多线程并发调用
 """
 from typing import Any, Dict, List, Optional, Tuple
+import json
 import os
 import re
 import time
@@ -423,25 +424,45 @@ class LLMClient:
         初始化 LLM 客户端。
         
         Args:
-            config: LLM 配置字典，包含以下字段：
-                - base_url: API 基础地址（必需）
-                - model_name: 模型名称（必需）
-                - temperature: 温度参数（默认 0.1）
-                - max_retries: 最大重试次数（默认 3）
-                - timeout: 超时时间秒（默认 60）
-                - max_tokens: 最大生成 token 数（默认 8192）
+	            config: LLM 配置字典，包含以下字段：
+	                - base_url: API 基础地址（必需）
+	                - model_name: 模型名称（必需）
+	                - temperature: 温度参数（默认 0.1）
+	                - max_retries: 最大重试次数（默认 3）
+	                - timeout: 超时时间秒（默认 60）
+	                - max_tokens: 最大生成 token 数（可选；仅在显式配置时才传给 API）
+	                - request_mode: 请求方式（sdk/post/auto，默认 sdk）
+	                - disable_response_format: 是否强制禁用 response_format（默认 false）
             key_manager: API Key 管理器（可选，默认使用全局单例）
         
         Raises:
-            ImportError: 未安装 openai 库
+            ImportError: 使用 sdk 但未安装 openai 库
             ValueError: 缺少必要配置
         """
-        if OpenAI is None:
-            raise ImportError("未安装 openai，请先 pip install openai")
-
         # ===== API Key 管理器 =====
         self._key_manager = key_manager or get_key_manager()
         self._current_api_key: str = self._key_manager.get_current_key()
+
+        # ===== 请求方式配置 =====
+        raw_request_mode = (
+            config.get("request_mode")
+            or os.getenv("LLM_REQUEST_MODE")
+            or "sdk"
+        )
+        raw_request_mode = str(raw_request_mode).lower()
+        if raw_request_mode not in {"sdk", "post", "auto"}:
+            logger.warning(f"未知 request_mode={raw_request_mode}，将回退为 sdk")
+            raw_request_mode = "sdk"
+        self.request_mode = raw_request_mode
+        self._http_session = None  # requests.Session，按需初始化
+
+        # ===== response_format 开关 =====
+        raw_disable_response_format = (
+            config.get("disable_response_format")
+            if "disable_response_format" in config
+            else os.getenv("LLM_DISABLE_RESPONSE_FORMAT")
+        )
+        self.disable_response_format = str(raw_disable_response_format).lower() in {"1", "true", "yes", "on"}
 
         # ===== base_url：从 cfg.yaml 读取并自动修正 =====
         base_url = config.get("base_url") or os.getenv("OPENAI_BASE_URL")
@@ -456,13 +477,18 @@ class LLMClient:
         if not self.model:
             raise ValueError("❌ 未找到 model_name，请在 cfg.yaml 的 llm 块中配置")
 
-        # ===== 创建客户端 =====
-        self.client = OpenAI(api_key=self._current_api_key, base_url=base_url)
+        # ===== 创建 OpenAI SDK 客户端（按需）=====
+        self.client = None
+        if self.request_mode in {"sdk", "auto"}:
+            if OpenAI is None:
+                if self.request_mode == "sdk":
+                    raise ImportError("未安装 openai，请先 pip install openai，或设置 llm.request_mode=post")
+            else:
+                self.client = OpenAI(api_key=self._current_api_key, base_url=base_url)
         self.base_url = base_url
         self.temperature = config.get("temperature", 0.1)
         self.max_retries = config.get("max_retries", 3)
         self.timeout = config.get("timeout", 60)
-        self.max_tokens = config.get("max_tokens", 8192)  # LongCat 默认需要指定
         
         # ===== 思考模式配置 =====
         self.enable_thinking = config.get("enable_thinking", False)
@@ -470,6 +496,14 @@ class LLMClient:
         # ===== 检测 API 提供商特性 =====
         self._provider_name = self._detect_provider(base_url)
         self._supports_response_format = self._provider_name not in _PROVIDERS_NO_RESPONSE_FORMAT
+        if self.disable_response_format:
+            logger.info("已强制禁用 response_format 参数（disable_response_format=true）")
+        
+        # ===== max_tokens 配置 =====
+        # 语义：只有在 cfg.yaml 中显式给出 max_tokens 时才传给 API。
+        # 默认不传 max_tokens，让后端自行使用默认输出上限。
+        raw_max_tokens = config.get("max_tokens")
+        self.max_tokens = raw_max_tokens if raw_max_tokens is not None else None
         
         # 记录初始化信息
         key_preview = self._current_api_key[:8] + "..."
@@ -530,6 +564,99 @@ class LLMClient:
                 return provider
         return ""
 
+    def _resolve_request_backend(self) -> str:
+        """
+        解析当前实际使用的请求后端。
+
+        request_mode 语义：
+        - sdk: 强制使用 OpenAI SDK
+        - post: 强制使用 HTTP POST（OpenAI 兼容接口）
+        - auto: 优先 SDK，若 SDK 不可用则退化为 POST
+        """
+        if self.request_mode == "auto":
+            return "sdk" if self.client is not None else "post"
+        return self.request_mode
+
+    def _call_chat_completions_sdk(self, params: Dict[str, Any]) -> str:
+        """通过 OpenAI SDK 调用 chat.completions.create。"""
+        if self.client is None:
+            raise RuntimeError("OpenAI SDK 客户端未初始化（请检查 request_mode / openai 安装）")
+        resp = self.client.chat.completions.create(**params)
+        return resp.choices[0].message.content or ""
+
+    def _call_chat_completions_post(self, params: Dict[str, Any]) -> str:
+        """
+        通过 HTTP POST 调用 OpenAI 兼容的 /chat/completions 接口。
+
+        设计目标：
+        - 与 curl / requests 调用等价；
+        - 不依赖 OpenAI SDK；
+        - 失败时抛出包含 HTTP 状态码的异常，便于上层重试/换 key。
+        """
+        timeout = float(params.get("timeout", self.timeout))
+        request_body = {k: v for k, v in params.items() if k != "timeout"}
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._current_api_key}",
+        }
+        body_json = json.dumps(request_body, ensure_ascii=False)
+
+        # 优先使用 requests（若未安装则回退 urllib）
+        try:
+            import requests  # type: ignore
+
+            if self._http_session is None:
+                self._http_session = requests.Session()
+
+            response = self._http_session.post(
+                url,
+                headers=headers,
+                data=body_json.encode("utf-8"),
+                timeout=timeout,
+            )
+            status_code = int(response.status_code)
+            text = response.text or ""
+            if status_code != 200:
+                raise Exception(f"HTTP {status_code}: {text[:1000]}")
+            result = response.json()
+
+        except ImportError:
+            import urllib.request
+            import urllib.error
+
+            req = urllib.request.Request(
+                url,
+                data=body_json.encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    status_code = int(resp.getcode() or 0)
+                    text = resp.read().decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as http_error:
+                status_code = int(http_error.code or 0)
+                text = http_error.read().decode("utf-8", errors="replace")
+            if status_code != 200:
+                raise Exception(f"HTTP {status_code}: {text[:1000]}")
+            result = json.loads(text)
+
+        choices = result.get("choices") or []
+        if not choices:
+            raise Exception(f"无效响应: {str(result)[:500]}")
+        content = choices[0].get("message", {}).get("content", "") or ""
+        return content
+
+    def _call_chat_completions(self, params: Dict[str, Any]) -> str:
+        """根据 request_mode 分派到 SDK 或 POST 后端。"""
+        backend = self._resolve_request_backend()
+        if backend == "sdk":
+            return self._call_chat_completions_sdk(params)
+        if backend == "post":
+            return self._call_chat_completions_post(params)
+        raise ValueError(f"未知请求后端: {backend}")
+
     def chat(
         self,
         prompt: str,
@@ -575,8 +702,35 @@ class LLMClient:
             EndpointNotFoundError: 端点不存在 (404)
         """
         last_error = None
-        # 是否尝试使用 response_format（如果 API 不支持会自动禁用）
-        use_response_format = json_mode and self._supports_response_format
+        # 是否尝试使用 response_format（如果 API 不支持会自动禁用，或被配置强制关闭）
+        use_response_format = (
+            json_mode
+            and self._supports_response_format
+            and not self.disable_response_format
+        )
+
+        # 是否开启详细请求日志（用于排查超时/限流等问题）
+        debug_llm = os.getenv("LLM_DEBUG", "").lower() in {"1", "true", "yes", "on"}
+        debug_curl = os.getenv("LLM_DEBUG_CURL", "").lower() in {"1", "true", "yes", "on"}
+
+        def truncate_for_log(text: str, max_chars: int = 400) -> str:
+            """截断文本用于日志打印，避免过长。"""
+            clean_text = (text or "").replace("\n", " ").strip()
+            if max_chars <= 0 or len(clean_text) <= max_chars:
+                return clean_text
+            return clean_text[:max_chars] + f"...(截断，原长 {len(clean_text)} 字)"
+
+        def flush_log_handlers() -> None:
+            """刷新日志 handlers，确保每次调用及时落盘。"""
+            for handler in logger.handlers:
+                try:
+                    handler.flush()
+                except Exception:
+                    continue
+
+        def shell_escape_single_quotes(text: str) -> str:
+            """在 shell 单引号字符串中安全转义单引号。"""
+            return (text or "").replace("'", "'\"'\"'")
         
         for attempt in range(self.max_retries):
             try:
@@ -586,8 +740,9 @@ class LLMClient:
                     "messages": messages,
                     "temperature": 0.1 if json_mode else self.temperature,
                     "timeout": self.timeout,
-                    "max_tokens": self.max_tokens,
                 }
+                if self.max_tokens is not None:
+                    params["max_tokens"] = self.max_tokens
                 
                 # 只有支持 response_format 的 API 才添加此参数
                 if use_response_format:
@@ -600,19 +755,87 @@ class LLMClient:
                     logger.debug(f"🧠 思考模式已启用，正在调用 LLM...")
                 else:
                     logger.debug(f"💬 普通模式调用 LLM...")
-                
-                resp = self.client.chat.completions.create(**params)
-                content = resp.choices[0].message.content or ""
+
+                if debug_llm:
+                    total_chars = sum(len(m.get("content", "")) for m in messages)
+                    msg_lines = []
+                    for msg_idx, msg in enumerate(messages, start=1):
+                        role = msg.get("role", "")
+                        content = msg.get("content", "")
+                        msg_lines.append(
+                            f"  - msg{msg_idx} role={role}, len={len(content)}, "
+                            f"preview={truncate_for_log(content)}"
+                        )
+                    logger.info("=" * 80)
+                    logger.info(
+                        "[LLM][REQ] attempt=%s/%s provider=%s model=%s base_url=%s "
+                        "json_mode=%s response_format=%s thinking=%s timeout=%ss "
+                        "temperature=%s max_tokens=%s messages=%s total_chars=%s\n%s",
+                        attempt + 1,
+                        self.max_retries,
+                        self.provider,
+                        self.model,
+                        self.base_url,
+                        json_mode,
+                        use_response_format,
+                        self.enable_thinking,
+                        self.timeout,
+                        params.get("temperature"),
+                        self.max_tokens,
+                        len(messages),
+                        total_chars,
+                        "\n".join(msg_lines),
+                    )
+                    flush_log_handlers()
+
+                    if debug_curl:
+                        request_url = f"{self.base_url.rstrip('/')}/chat/completions"
+                        request_body = dict(params)
+                        request_body.pop("timeout", None)  # timeout 用 curl 的 --max-time 表达
+                        body_json = json.dumps(request_body, ensure_ascii=False)
+                        escaped_body = shell_escape_single_quotes(body_json)
+                        curl_lines = [
+                            f"curl -sS -X POST '{request_url}' \\",
+                            "  -H 'Content-Type: application/json' \\",
+                            "  -H 'Authorization: Bearer ${OPENAI_API_KEY}' \\",
+                            f"  --max-time {self.timeout} \\",
+                            f"  -d '{escaped_body}'",
+                        ]
+                        logger.info("[LLM][CURL]\n%s", "\n".join(curl_lines))
+                        flush_log_handlers()
+
+                request_start = time.time()
+                content = self._call_chat_completions(params)
                 
                 # 成功时记录日志
                 if attempt > 0:
                     logger.info(f"LLM 调用成功（第 {attempt + 1} 次尝试）")
+
+                if debug_llm:
+                    elapsed = time.time() - request_start
+                    logger.info(
+                        "[LLM][RESP] attempt=%s/%s elapsed=%.2fs content_len=%s preview=%s",
+                        attempt + 1,
+                        self.max_retries,
+                        elapsed,
+                        len(content),
+                        truncate_for_log(content, max_chars=600),
+                    )
+                    flush_log_handlers()
                 
                 return content
                 
             except TypeError as e:
                 # ===== API 不支持某些参数（如 response_format）=====
                 err_str = str(e)
+                if debug_llm:
+                    logger.warning(
+                        "[LLM][ERR] attempt=%s/%s error_type=TypeError error=%s",
+                        attempt + 1,
+                        self.max_retries,
+                        err_str[:800],
+                    )
+                    flush_log_handlers()
                 if "response_format" in err_str or "unexpected keyword argument" in err_str:
                     if use_response_format:
                         logger.warning(
@@ -631,6 +854,16 @@ class LLMClient:
                 last_error = e
                 err_msg = str(e)
                 err_lower = err_msg.lower()
+
+                if debug_llm:
+                    logger.warning(
+                        "[LLM][ERR] attempt=%s/%s error_type=%s error=%s",
+                        attempt + 1,
+                        self.max_retries,
+                        type(e).__name__,
+                        err_msg[:800],
+                    )
+                    flush_log_handlers()
                 
                 # ===== 404 端点不存在：通常是 base_url 配置错误 =====
                 if "404" in err_lower or "not found" in err_lower:
@@ -705,12 +938,14 @@ class LLMClient:
             True 如果后端可用，否则 False
         """
         try:
-            self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": "hi"}],
-                max_tokens=10,
-                timeout=15,
-            )
+            params = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "temperature": self.temperature,
+                "timeout": 15,
+                "max_tokens": 10,
+            }
+            self._call_chat_completions(params)
             logger.info(f"LLM 后端验证通过: model={self.model}")
             return True
         except Exception as e:
@@ -745,15 +980,18 @@ class LLMClient:
                 return False
 
             # 关闭旧客户端
-            if self.client:
+            if self.client is not None:
                 try:
                     self.client.close()
                 except Exception:
                     pass
 
-            # 创建新客户端
+            # 更新当前 Key；按需创建新 SDK 客户端
             self._current_api_key = new_key
-            self.client = OpenAI(api_key=new_key, base_url=self.base_url)
+            if OpenAI is not None and self.request_mode in {"sdk", "auto"}:
+                self.client = OpenAI(api_key=new_key, base_url=self.base_url)
+            else:
+                self.client = None
 
             key_preview = new_key[:8] + "..."
             logger.info(
@@ -778,6 +1016,13 @@ class LLMClient:
                 logger.debug("LLM 客户端已关闭")
             except Exception as e:
                 logger.warning(f"关闭 LLM 客户端时出错: {e}")
+        
+        if self._http_session is not None:
+            try:
+                self._http_session.close()
+                self._http_session = None
+            except Exception as e:
+                logger.warning(f"关闭 HTTP Session 时出错: {e}")
 
     def __enter__(self) -> "LLMClient":
         """支持上下文管理器"""

@@ -11,3 +11,7 @@ outputs_backup/
 outputs/
 logs/
 *.log
+BAAI/
+# OCR 临时文件
+nohup.out
+tools/ocr/nohup.out

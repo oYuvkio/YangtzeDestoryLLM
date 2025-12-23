@@ -107,7 +107,11 @@ P2_SCHEMA_PROMPT = """
 
 1. 根据 CQ 中隐含的语义需求，归纳出候选实体类（classes）：
    - 每个类用英文 name（如 FloodEvent）、中文名 cn_name（如 洪水事件）和定义 (definition) 描述；
-   - examples 中给出 1~3 个典型实例（中文字符串）。
+   - examples 中给出 1~3 个典型实例（中文字符串）；
+   - parent 字段用于表达继承关系（可选）：
+     * 若该类是某个更通用类的子类，则 parent 为父类的 name（如 FloodEvent 的 parent 为 DisasterEvent）；
+     * 若该类是顶层类或独立概念，则 parent 为 null 或省略；
+     * 建议构建2-3层的适度层级结构，既能表达通用-具体关系，又不过度复杂。
 
 2. 归纳出候选关系（relations）：
    - name 为关系英文名（如 has_cause）；
@@ -147,6 +151,7 @@ P2_SCHEMA_PROMPT = """
    - "cn_name": string
    - "definition": string
    - "examples": string 数组
+   - "parent": string 或 null（可选，表示父类名称）
 4. "relations" 中每个元素必须包含字段：
    - "name": string
    - "cn_name": string
@@ -164,18 +169,20 @@ P2_SCHEMA_PROMPT = """
 参考输出结构示例（内容仅供参考）：
 {{
   "classes": [
-    {{
+    {
       "name": "DisasterEvent",
       "cn_name": "灾害事件",
       "definition": "在一定时间和空间范围内发生的与长江流域相关的水旱灾害过程",
-      "examples": ["1998年长江特大洪水", "2022年长江流域特大干旱"]
-    }},
-    {{
+      "examples": ["1998年长江特大洪水", "2022年长江流域特大干旱"],
+      "parent": null
+    },
+    {
       "name": "FloodEvent",
       "cn_name": "洪水事件",
       "definition": "特指长江干流或支流发生的明显洪水过程",
-      "examples": ["1998年长江特大洪水"]
-    }}
+      "examples": ["1998年长江特大洪水"],
+      "parent": "DisasterEvent"
+    }
   ],
   "relations": [
     {{

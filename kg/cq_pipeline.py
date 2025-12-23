@@ -7,6 +7,8 @@ Prompt 设计、伪代码与示例均与 ``summary/CQ_Summary.txt`` 对齐，方
 from __future__ import annotations
 
 import json
+import logging
+import re
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,6 +27,9 @@ from .prompts import (
 from kg.utils.entity_linking import EntityNormalizer, normalize_entity
 
 
+logger = logging.getLogger(__name__)
+
+
 # =========================
 # 数据结构定义
 # =========================
@@ -41,6 +46,7 @@ class ClassDef:
     cn_name: str
     definition: str
     examples: List[str]
+    parent: Optional[str] = None  # 父类名称，用于表达继承关系
 
 
 @dataclass
@@ -111,12 +117,34 @@ class LLMJsonClient:
         return cleaned
 
     def _safe_load(self, raw: str) -> Dict[str, Any]:
+        """
+        尽量鲁棒地从模型输出中解析 JSON：
+        1) 直接 json.loads；
+        2) 若失败，尝试从文本中截取第一个 {...} 或 [...] 片段再解析；
+        3) 仍失败则返回空 dict。
+        """
         cleaned = self._strip_code_fence(raw)
         if not cleaned:
             return {}
         try:
             obj = json.loads(cleaned)
         except Exception:
+            obj = None
+
+        if obj is None:
+            # 尝试截取 JSON 子串（优先对象，其次数组）
+            match = re.search(r"(\{[\s\S]*\}|\[[\s\S]*\])", cleaned)
+            if match:
+                snippet = match.group(1)
+                try:
+                    obj = json.loads(snippet)
+                    logger.warning("[LLMJsonClient] JSON 解析失败，已使用子串兜底解析。")
+                except Exception:
+                    obj = None
+
+        if obj is None:
+            preview = cleaned[:500].replace("\n", " ")
+            logger.warning(f"[LLMJsonClient] JSON 解析失败，返回空结果。preview={preview}")
             return {}
 
         # 如果模型直接给了一个数组，就包一层 cqs，方便 P1 使用
@@ -475,13 +503,108 @@ class CQLLMPipeline:
         user_prompt = P5_EXTRACTION_PROMPT.format(
             schema_json=schema_json,
             event_schema=EVENT_SCHEMA_HINT,
-            paragraph=paragraph.strip(),
+            input_text=paragraph.strip(),
             class_usage_hint=class_usage_hint,
         )
         res = self.client.call("仅输出 JSON，不要解释。", user_prompt)
+        res = self._sanitize_p5_result(res, schema)
         if save_path:
             self._dump_json(res, save_path)
         return res
+
+    @staticmethod
+    def _sanitize_p5_result(res: Any, schema: TBoxSchema) -> Dict[str, Any]:
+        """
+        对 P5 抽取结果做最小化清洗与约束校验：
+        - 保证顶层包含 events/triples
+        - 过滤非 dict 元素
+        - event_type 不在类集合时回退到 DisasterEvent/首个类（并记录 warning）
+        - predicate 不在关系集合时标记 _invalid_predicate=True（不直接丢弃）
+        - 补齐关键字段，避免下游评测 KeyError
+        """
+        if not isinstance(res, dict):
+            logger.warning("[P5] LLM 返回非 dict，已置空。")
+            return {"events": [], "triples": [], "error": "invalid_response_type"}
+
+        events = res.get("events") if isinstance(res.get("events"), list) else []
+        triples = res.get("triples") if isinstance(res.get("triples"), list) else []
+
+        allowed_event_types = {c.name for c in schema.classes if c.name}
+        allowed_predicates = {r.name for r in schema.relations if r.name}
+        fallback_event_type = (
+            "DisasterEvent"
+            if "DisasterEvent" in allowed_event_types
+            else next(iter(allowed_event_types), "")
+        )
+
+        invalid_event_type_count = 0
+        cleaned_events: List[Dict[str, Any]] = []
+        for event_item in events:
+            if not isinstance(event_item, dict):
+                continue
+            ev = dict(event_item)
+            ev.setdefault("event_id", "")
+            ev.setdefault("event_type", "")
+            ev.setdefault("name", "")
+            ev.setdefault("source", "")
+
+            if allowed_event_types and ev["event_type"] not in allowed_event_types:
+                invalid_event_type_count += 1
+                ev["event_type"] = fallback_event_type or ev["event_type"]
+
+            time_block = ev.get("time")
+            if not isinstance(time_block, dict):
+                time_block = {}
+            time_block.setdefault("start_time", "")
+            time_block.setdefault("end_time", "")
+            ev["time"] = time_block
+
+            space_block = ev.get("space")
+            if not isinstance(space_block, dict):
+                space_block = {}
+            for key in ["main_stream", "tributaries", "provinces"]:
+                value = space_block.get(key)
+                if not isinstance(value, list):
+                    space_block[key] = []
+            ev["space"] = space_block
+
+            ev.setdefault("causes", [])
+            if not isinstance(ev["causes"], list):
+                ev["causes"] = []
+            impacts_block = ev.get("impacts")
+            if not isinstance(impacts_block, dict):
+                impacts_block = {}
+            impacts_block.setdefault("affected_population", "")
+            impacts_block.setdefault("deaths", "")
+            impacts_block.setdefault("direct_economic_loss", "")
+            ev["impacts"] = impacts_block
+
+            responses_block = ev.get("responses")
+            if not isinstance(responses_block, list):
+                responses_block = []
+            ev["responses"] = responses_block
+
+            cleaned_events.append(ev)
+
+        invalid_predicate_count = 0
+        cleaned_triples: List[Dict[str, Any]] = []
+        for triple_item in triples:
+            if not isinstance(triple_item, dict):
+                continue
+            tr = dict(triple_item)
+            for key in ["subject", "predicate", "object", "event_id", "evidence"]:
+                tr.setdefault(key, "")
+            if allowed_predicates and tr["predicate"] not in allowed_predicates:
+                invalid_predicate_count += 1
+                tr["_invalid_predicate"] = True
+            cleaned_triples.append(tr)
+
+        if invalid_event_type_count:
+            logger.warning(f"[P5] 发现不在 TBox 中的 event_type: {invalid_event_type_count} 个，已回退为 {fallback_event_type or '原值'}。")
+        if invalid_predicate_count:
+            logger.warning(f"[P5] 发现不在 TBox 中的 predicate: {invalid_predicate_count} 个，已标记 _invalid_predicate=True。")
+
+        return {"events": cleaned_events, "triples": cleaned_triples}
 
     # ---------- 工具函数 ----------
     @staticmethod
@@ -491,7 +614,7 @@ class CQLLMPipeline:
         def pick(d: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
             return {k: d.get(k) for k in keys if k in d}
 
-        class_keys = ["name", "cn_name", "definition", "examples"]
+        class_keys = ["name", "cn_name", "definition", "examples", "parent"]
         rel_keys = ["name", "cn_name", "domain",
                     "range", "definition", "functional"]
         attr_keys = ["owner", "name", "cn_name", "value_type"]
@@ -579,12 +702,16 @@ def apply_p4_suggestions(schema: TBoxSchema, p4_result: Dict[str, Any]) -> TBoxS
                     cls.cn_name = cn_name
                 if (not cls.definition) and definition:
                     cls.definition = definition
+                # 支持通过 P4 建议补充 parent
+                if extra and (not cls.parent):
+                    cls.parent = extra
             else:
                 class_map[name] = ClassDef(
                     name=name,
                     cn_name=cn_name or name,
                     definition=definition or "",
                     examples=[],
+                    parent=extra if extra else None,
                 )
 
         # ---- 关系补充 ----

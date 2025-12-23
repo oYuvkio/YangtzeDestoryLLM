@@ -14,7 +14,7 @@
 
 使用示例：
 python tools/build_eval_pool.py \
-  --root data/corpus_for_kg/handled_all_kg_corpus \
+  --root data/corpus_for_kg/handled_used_kg_corpus \
   --out-dir data/p5_eval_pool \
   --min-chars 150 --max-chars 400 \
   --target law_plan=60 gazette_yearbook=80 case_paper=100 news_popular=60
@@ -1314,7 +1314,7 @@ def main() -> int:
 
     # 核心路径
     input_jsonl = Path(args.input_jsonl) if args.input_jsonl else None
-    root = Path(pick(args.root, cfg_paths.get("corpus_full"), "data/corpus_for_kg/handled_all_kg_corpus")) if not input_jsonl else None
+    root = Path(pick(args.root, cfg_paths.get("corpus_full"), "data/corpus_for_kg/handled_used_kg_corpus")) if not input_jsonl else None
     out_dir = Path(pick(args.out_dir, cfg_paths.get("eval_pool_dir"), "data/p5_eval_pool"))
 
     # 输入源校验

@@ -178,11 +178,10 @@ step2_filter() {
     mkdir -p "$output_dir"
     
     run_cmd "python tools/filter_corpus_light.py \\
-        --input '$HANDLED_CORPUS_DIR' \\
-        --output '$LIGHT_POOL_FILE' \\
+        --root '$HANDLED_CORPUS_DIR' \\
+        --out '$LIGHT_POOL_FILE' \\
         --min-chars 200 \\
         --max-chars 4000 \\
-        --use-llm \\
         --cfg configs/cfg.yaml"
     
     echo "✅ 过滤完成，输出文件: $LIGHT_POOL_FILE"

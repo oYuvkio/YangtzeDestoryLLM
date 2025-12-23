@@ -429,19 +429,96 @@ class PurposeClassifier:
         
         return score, matched
     
-    def _get_year(self, doc: Dict[str, Any]) -> Optional[int]:
-        """提取文档年份"""
-        year = doc.get("year")
-        if year and isinstance(year, int):
-            return year
-        
-        # 尝试从文本中提取
-        text = doc.get("text", "") + doc.get("doc_title", "")
-        match = re.search(r"(19|20)\d{2}年", text)
-        if match:
-            return int(match.group(0).replace("年", ""))
-        
+    @staticmethod
+    def _coerce_year(value: Any) -> Optional[int]:
+        """
+        将 year 字段尽量解析为 int 年份。
+
+        - 支持 int / float / str（如 "2020"、"2020年"、"2020.0"）
+        - 仅接受合理年份范围，避免误把页码/编号当作年份
+        """
+        if value is None:
+            return None
+
+        if isinstance(value, int):
+            return value if 1800 <= value <= 2200 else None
+
+        if isinstance(value, float):
+            if value.is_integer():
+                year = int(value)
+                return year if 1800 <= year <= 2200 else None
+            return None
+
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+            m = re.search(r"(19|20)\d{2}", s)
+            if not m:
+                return None
+            year = int(m.group(0))
+            return year if 1800 <= year <= 2200 else None
+
         return None
+
+    @staticmethod
+    def _extract_year_from_text(text: str) -> Optional[int]:
+        """
+        从任意文本中提取可能的年份。
+
+        优先级：
+        1) 显式标记：__year_YYYY__（来自 meta/文件名）
+        2) 中文写法：YYYY年
+        3) 兜底：独立的 4 位年份（路径/标题中更常见）
+        """
+        if not text:
+            return None
+
+        # 1) __year_YYYY__（最可靠）
+        m = re.search(r"__year_((?:19|20)\d{2})__", text)
+        if m:
+            return int(m.group(1))
+
+        # 2) YYYY年（中文年份）
+        m = re.search(r"((?:19|20)\d{2})年", text)
+        if m:
+            return int(m.group(1))
+
+        # 3) 独立 4 位数字（尽量减少误伤）
+        m = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", text)
+        if m:
+            return int(m.group(1))
+
+        return None
+
+    def _get_year(self, doc: Dict[str, Any]) -> Optional[int]:
+        """
+        提取文档年份（用于可选的时间隔离）。
+
+        注意：上游 `filter_corpus_light` 的 year 字段多为字符串（甚至为空），
+        因此这里做更鲁棒的解析：
+        1) doc["year"]：支持 int/float/str
+        2) rel_path/source_file/title/doc_title：优先匹配 __year_YYYY__ / YYYY年
+        3) text/doc_title：回退匹配 YYYY年
+        """
+        year = self._coerce_year(doc.get("year"))
+        if year is not None:
+            return year
+
+        rel_path = str(doc.get("rel_path") or "")
+        source_file = str(doc.get("source_file") or "")
+        title = str(doc.get("title") or "")
+        doc_title = str(doc.get("doc_title") or "")
+
+        # 先从短文本（路径/标题）提取：更可靠，也更可能包含 __year_YYYY__
+        meta_text = " ".join([rel_path, source_file, title, doc_title]).strip()
+        year = self._extract_year_from_text(meta_text)
+        if year is not None:
+            return year
+
+        # 再从正文中提取：可能包含事件年份/引用年份，作为兜底
+        text = str(doc.get("text") or "") + doc_title
+        return self._extract_year_from_text(text)
     
     def _get_doc_id(self, doc: Dict[str, Any]) -> str:
         """生成文档唯一 ID"""
