@@ -108,16 +108,17 @@ dedup_schema:
 
 # 语料三分法配置（P4/P5/EVAL）
 # 用于 tools/build_manifest.py 和 filters/apply_manifest.py
+# 更新于 2024-12-29：针对 7365 条新数据规模调整
 corpus_split:
   # ========== P4 配置（本体增强）==========
   # P4 倾向的来源类型（概念性：定义、规则、制度）
+  # 注意：gazette_yearbook 移除，因其包含大量实例性内容（灾情统计、事件记录）
   p4_sources:
     - emergency_plan
     - regulation
     - technical_guideline
-    - gazette_yearbook
     - law_plan            # filter_labels.source_guess 中的值
-  
+
   # P4 优选的 topic_label
   p4_topic_labels:
     - institution_regulation
@@ -148,12 +149,13 @@ corpus_split:
   p4_min_score: 3
   
   # ========== EVAL 配置（评测）==========
-  # EVAL 倾向的来源类型
+  # EVAL 倾向的来源类型（事件性、案例性文档）
   eval_sources:
     - news
     - case_study
     - news_popular
-  
+    - case_paper          # 学术案例论文，包含具体灾害事件分析
+
   # EVAL 倾向的主题标签
   eval_topic_labels:
     - disasterevent
@@ -173,18 +175,18 @@ corpus_split:
     - '死亡\d+人'
     - '转移\d+[万]?人'
   
-  # EVAL 分层抽样目标（按 topic_label）
+  # EVAL 分层抽样目标（按 topic_label）- 针对 ~7000 条数据规模，目标15%（约1100条）
   eval_stratify_targets:
-    disasterevent: 150
-    disaster_event: 150
-    measure_response: 180
-    backgroundanalysis: 50
-    background_analysis: 50
-    institution_regulation: 50
-    impact_assessment: 10
-  
-  # EVAL 总量上限（设为 null 表示不限制）
-  eval_max_count: 500
+    disasterevent: 300
+    disaster_event: 300
+    measure_response: 450
+    backgroundanalysis: 150
+    background_analysis: 150
+    institution_regulation: 150
+    impact_assessment: 50
+
+  # EVAL 总量上限（约占 15% 的 7365 条）
+  eval_max_count: 1100
   
   # EVAL 抽样比例（当不使用分层目标时）
   eval_sample_ratio: 0.3

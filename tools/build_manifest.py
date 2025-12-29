@@ -89,10 +89,11 @@ class Constants:
     VERSION: Final[str] = "1.1.0"
     TOOL_NAME: Final[str] = "三分法语料清单生成工具"
     
-    # P4 倾向的来源类型
+    # P4 倾向的来源类型（概念性、制度性文档）
+    # 注意：gazette_yearbook 虽然包含制度描述，但也有大量实例性内容（灾情统计、事件记录）
+    # 因此不在此列表中，而是通过内容特征动态判断
     P4_SOURCE_TYPES: Set[str] = {
         "emergency_plan",
-        "gazette_yearbook", 
         "regulation",
         "technical_guideline",
         "law_plan",
@@ -119,11 +120,12 @@ class Constants:
     # P4 最低概念得分阈值
     P4_MIN_SCORE: int = 3
     
-    # EVAL 倾向的来源类型
+    # EVAL 倾向的来源类型（事件性、案例性文档）
     EVAL_SOURCE_TYPES: Set[str] = {
         "news",
         "case_study",
         "news_popular",
+        "case_paper",  # 学术案例论文，包含具体灾害事件分析
     }
     
     # EVAL 倾向的主题标签
@@ -148,19 +150,19 @@ class Constants:
         r"(?:省|市|县|区|镇|村|站)",
     ]
     
-    # 分层抽样目标（EVAL）
+    # 分层抽样目标（EVAL）- 针对 ~7000 条数据规模，EVAL 目标 15%（约1100条）
     STRATIFY_TARGETS: Dict[str, int] = {
-        "disasterevent": 150,
-        "disaster_event": 150,
-        "measure_response": 180,
-        "backgroundanalysis": 50,
-        "background_analysis": 50,
-        "institution_regulation": 50,
-        "impact_assessment": 10,
+        "disasterevent": 300,
+        "disaster_event": 300,
+        "measure_response": 450,
+        "backgroundanalysis": 150,
+        "background_analysis": 150,
+        "institution_regulation": 150,
+        "impact_assessment": 50,  # 数据量有限（仅105条），设为50
     }
-    
-    # EVAL 总量上限
-    EVAL_MAX_COUNT: Optional[int] = 500
+
+    # EVAL 总量上限（约占 15% 的 7365 条）
+    EVAL_MAX_COUNT: Optional[int] = 1100
     
     # EVAL 抽样比例（当不使用分层目标时）
     EVAL_SAMPLE_RATIO: float = 0.3
@@ -287,7 +289,7 @@ class ClassifyStats:
     time_isolated_eval: int = 0
     dev_count: int = 0
     test_count: int = 0
-    
+
     # 详细规则统计
     rule_a1_source_type: int = 0      # P4 来源类型命中
     rule_a2_topic_label: int = 0      # P4 topic_label 命中
@@ -297,10 +299,11 @@ class ClassifyStats:
     rule_c_time_isolation_p4: int = 0 # 时间隔离到 P4
     rule_c_time_isolation_eval: int = 0  # 时间隔离到 EVAL
     rule_d_mixed_content: int = 0     # 混合内容（章节级分流）
-    rule_e_fallback_source: int = 0   # 兆底按来源类型
-    rule_e_fallback_default: int = 0  # 兆底默认 P5
+    rule_e_fallback_source: int = 0   # 兜底按来源类型
+    rule_e_fallback_default: int = 0  # 兜底默认 P5
+    rule_gazette_yearbook_instance: int = 0  # 年鉴按实例特征划入 P5
     stratify_sampled_eval: int = 0    # 分层抽样进 EVAL
-    
+
     # 按 topic_label 统计
     eval_by_topic: Dict[str, int] = field(default_factory=dict)
 
@@ -368,8 +371,26 @@ class PurposeClassifier:
     
     def _get_source_type(self, doc: Dict[str, Any]) -> str:
         """提取 source_type（兼容多种字段路径）"""
-        source_type = doc.get("source_type", "")
-        if source_type:
+        source_type = str(doc.get("source_type", "") or "").strip()
+
+        # 重要：上游语料清洗阶段的 source_type 可能是非标准值（如 technical_report 等），
+        # 而 filter_corpus_light 的 LLM 标签里通常会给出更稳定的 source_guess（law_plan/gazette_yearbook/news_popular/case_paper 等）。
+        # 这里仅当 source_type 属于“已知集合”时才优先采用；否则回退到 source_guess。
+        known_source_types: Set[str] = (
+            set(Constants.P4_SOURCE_TYPES)
+            | set(Constants.EVAL_SOURCE_TYPES)
+            | {
+                # filter_corpus_light 常见输出
+                "law_plan",
+                "gazette_yearbook",
+                "news_popular",
+                "case_paper",
+                # 兼容可能的别名
+                "case_study",
+                "news",
+            }
+        )
+        if source_type and source_type in known_source_types:
             return source_type
         
         # 回退到 filter_labels.source_guess
@@ -377,7 +398,7 @@ class PurposeClassifier:
         if isinstance(filter_labels, dict):
             return filter_labels.get("source_guess", "")
         
-        return ""
+        return source_type
     
     def _compute_p4_score(self, doc: Dict[str, Any]) -> Tuple[int, List[str]]:
         """计算 P4 倾向得分（概念性）"""
@@ -571,7 +592,20 @@ class PurposeClassifier:
                 self.stats.p4_count += 1
                 self.assigned_docs[doc_id] = entry.purpose
                 return entry
-        
+
+        # ===== 特殊处理：gazette_yearbook 按内容区分 =====
+        # 年鉴/公报虽然包含制度描述，但也有大量实例性内容（灾情统计、事件记录）
+        # 当有明显实例特征时，优先划入 P5 而非 P4
+        source_type = self._get_source_type(doc)
+        if source_type == "gazette_yearbook" and instance_score >= 2:
+            entry.purpose = Purpose.P5.value
+            entry.rationale = f"gazette_yearbook_instance:p4={p4_score},inst={instance_score}"
+            self.stats.p5_count += 1
+            self.stats.rule_gazette_yearbook_instance += 1
+            self.assigned_docs[doc_id] = entry.purpose
+            self.p5_candidates.append((doc_id, doc, entry))
+            return entry
+
         # ===== 规则A：强概念性 → P4 =====
         if p4_score >= Constants.P4_MIN_SCORE and instance_score == 0:
             entry.purpose = Purpose.P4.value
@@ -728,8 +762,9 @@ class PurposeClassifier:
         logger.info(f"  rule_b2_instance_strong(实例强命中): {self.stats.rule_b2_instance_strong}")
         logger.info(f"  rule_c_time_isolation_p4(时间隔离P4): {self.stats.rule_c_time_isolation_p4}")
         logger.info(f"  rule_d_mixed_content(混合内容): {self.stats.rule_d_mixed_content}")
-        logger.info(f"  rule_e_fallback_source(兆底来源): {self.stats.rule_e_fallback_source}")
-        logger.info(f"  rule_e_fallback_default(兆底默认): {self.stats.rule_e_fallback_default}")
+        logger.info(f"  rule_e_fallback_source(兜底来源): {self.stats.rule_e_fallback_source}")
+        logger.info(f"  rule_e_fallback_default(兜底默认): {self.stats.rule_e_fallback_default}")
+        logger.info(f"  rule_gazette_yearbook_instance(年鉴实例): {self.stats.rule_gazette_yearbook_instance}")
         logger.info(f"  stratify_sampled_eval(分层抽样EVAL): {self.stats.stratify_sampled_eval}")
         
         if self.stats.eval_by_topic:
@@ -880,6 +915,7 @@ def build_manifest(
             "rule_d_mixed_content": classifier.stats.rule_d_mixed_content,
             "rule_e_fallback_source": classifier.stats.rule_e_fallback_source,
             "rule_e_fallback_default": classifier.stats.rule_e_fallback_default,
+            "rule_gazette_yearbook_instance": classifier.stats.rule_gazette_yearbook_instance,
         },
         "eval_by_topic": classifier.stats.eval_by_topic,
     }

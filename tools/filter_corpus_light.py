@@ -78,7 +78,7 @@ from typing import (
     Tuple,
     Union,
 )
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from contextlib import contextmanager
 
 try:
@@ -154,11 +154,11 @@ class Constants:
     TOOL_NAME: Final[str] = "轻量级语料过滤器"
 
     # 默认过滤参数
-    DEFAULT_MIN_CHARS: Final[int] = 80
+    DEFAULT_MIN_CHARS: Final[int] = 200
     DEFAULT_MAX_CHARS: Final[int] = 3000
     DEFAULT_MIN_CN_RATIO: Final[float] = 0.3
     DEFAULT_MAX_WEIRD_RATIO: Final[float] = 0.15
-    DEFAULT_MIN_KEEP_CHARS: Final[int] = 200  # 保留片段最小长度，避免上下文过碎
+    DEFAULT_MIN_KEEP_CHARS: Final[int] = 300  # 保留片段最小长度，避免上下文过碎
 
     # 缓存与批处理
     DEFAULT_FLUSH_INTERVAL: Final[int] = 50
@@ -168,7 +168,7 @@ class Constants:
     SEGMENT_ID_LENGTH: Final[int] = 16
     
     # 上下文配置
-    DEFAULT_CONTEXT_CHARS: Final[int] = 500  # 默认上下文截取字符数
+    DEFAULT_CONTEXT_CHARS: Final[int] = 600  # 默认上下文截取字符数
 
 
 # ==============================================================================
@@ -296,6 +296,9 @@ class Segment:
         title: 标题
         source_type: 来源类型（如 gazette_yearbook）
         url: 原始 URL
+        pubtime: 发布时间（新闻类常见字段）
+        source: 来源（新闻/站点/机构）
+        keyword: 关键词（抓取时的命中词或人工标注）
         
         filter_decision: 过滤决策结果
         filter_labels: LLM 返回的标签信息
@@ -321,6 +324,9 @@ class Segment:
     title: str = ""          # 标题
     source_type: str = ""    # 来源类型
     url: str = ""            # 原始 URL
+    pubtime: str = ""        # 发布时间（可选）
+    source: str = ""         # 来源（可选）
+    keyword: str = ""        # 关键词（可选）
     
     filter_decision: Optional[str] = None
     filter_labels: Dict[str, Any] = field(default_factory=dict)
@@ -343,6 +349,9 @@ class Segment:
         d.setdefault("title", "")
         d.setdefault("source_type", "")
         d.setdefault("url", "")
+        d.setdefault("pubtime", "")
+        d.setdefault("source", "")
+        d.setdefault("keyword", "")
         return d
 
     def to_json(self) -> str:
@@ -370,6 +379,9 @@ class Segment:
             title=data.get("title", ""),
             source_type=data.get("source_type", ""),
             url=data.get("url", ""),
+            pubtime=data.get("pubtime", ""),
+            source=data.get("source", ""),
+            keyword=data.get("keyword", ""),
             # 过滤结果
             filter_decision=data.get("filter_decision"),
             filter_labels=data.get("filter_labels", {}),
@@ -1290,6 +1302,7 @@ class SegmentCollector:
         root: Path,
         min_chars: int = Constants.DEFAULT_MIN_CHARS,
         max_chars: int = Constants.DEFAULT_MAX_CHARS,
+        only_topdirs: Optional[Set[str]] = None,
     ):
         """
         初始化收集器。
@@ -1302,6 +1315,8 @@ class SegmentCollector:
         self.root = root
         self.min_chars = min_chars
         self.max_chars = max_chars
+        # 仅处理指定顶层目录（相对 root 的第一层目录名），为空表示不过滤
+        self.only_topdirs = set(only_topdirs or [])
 
     def collect(self, max_files: Optional[int] = None) -> List[Segment]:
         """
@@ -1337,6 +1352,17 @@ class SegmentCollector:
             # 跳过特殊文件
             if self._should_skip(txt_path):
                 continue
+            # 仅处理特定顶层目录（例如：文献/）
+            if self.only_topdirs:
+                try:
+                    rel = txt_path.relative_to(self.root)
+                    if not rel.parts:
+                        continue
+                    top = rel.parts[0]
+                except Exception:
+                    continue
+                if top not in self.only_topdirs:
+                    continue
             files.append(txt_path)
 
         return files
@@ -1399,6 +1425,9 @@ class SegmentCollector:
                 title=meta.get("title", ""),
                 source_type=meta.get("source_type", ""),
                 url=meta.get("url", ""),
+                pubtime=str(meta.get("pubtime", "")),
+                source=str(meta.get("source", "")),
+                keyword=str(meta.get("keyword", "")),
             )
 
         except Exception as e:
@@ -1892,6 +1921,12 @@ python tools/filter_corpus_light.py \
 python tools/filter_corpus_light.py \
   --root ./handled_corpus \
   --max-files 10 --verbose
+
+仅处理“文献”目录（增量：已有缓存会跳过，新增片段会触发 LLM 判定）
+python tools/filter_corpus_light.py \
+  --root data/corpus_for_kg/handled_used_kg_corpus \
+  --only-topdir 文献 \
+  --out data/corpus_for_kg/filtered_ytz_corpus/light_pool.jsonl
 """,
     )
 
@@ -1902,6 +1937,15 @@ python tools/filter_corpus_light.py \
         "-r",
         required=True,
         help="源语料根目录",
+    )
+    io_group.add_argument(
+        "--only-topdir",
+        action="append",
+        default=None,
+        help=(
+            "仅处理指定的顶层目录（可重复传入）。例如：--only-topdir 文献 "
+            "表示只扫描 root/文献 下的 *.txt"
+        ),
     )
     io_group.add_argument(
         "--out",
@@ -2013,6 +2057,11 @@ python tools/filter_corpus_light.py \
         help="忽略缓存，强制重新过滤",
     )
     run_group.add_argument(
+        "--rebuild-output",
+        action="store_true",
+        help="重建输出文件：备份现有输出后，基于缓存重新写出（不会删除缓存）",
+    )
+    run_group.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -2091,6 +2140,7 @@ def main() -> int:
             root,
             min_chars=config.min_chars,
             max_chars=config.max_chars,
+            only_topdirs=set(args.only_topdir or []),
         )
         segments = collector.collect(max_files=args.max_files)
 
@@ -2107,6 +2157,16 @@ def main() -> int:
             if cache_path.exists():
                 cache_path.unlink()
                 logger.info("已删除旧缓存，强制重新过滤")
+
+        if args.rebuild_output and out_path.exists():
+            # 输出文件是 append-only；当语料目录结构/文件重命名后，旧输出中的 rel_path 可能过期。
+            # rebuild-output 会在不删除缓存的前提下，备份旧输出并重建输出文件。
+            backup_path = out_path.with_name(
+                out_path.name + f".bak_{time.strftime('%Y%m%d_%H%M%S')}"
+            )
+            backup_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.rename(backup_path)
+            logger.info(f"已备份旧输出: {backup_path}")
 
         cache = FilterCache(cache_path)
         output = OutputManager(out_path)
