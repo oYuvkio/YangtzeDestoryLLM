@@ -23,8 +23,13 @@ from .prompts import (
     P4_AUGMENT_PROMPT,
     P5_EXTRACTION_PROMPT,
     EVENT_SCHEMA_HINT,
+    P5_COT_EXTRACTION_PROMPT,
+    parse_cot_response,
+    extract_cot_thought,
 )
 from kg.utils.entity_linking import EntityNormalizer, normalize_entity
+from kg.hallucination_filter import HallucinationFilter, filter_hallucinations, VerificationResult
+from kg.entity_fusion import EntityFusion, fuse_knowledge, SimpleEntityNormalizer
 
 
 logger = logging.getLogger(__name__)
@@ -661,6 +666,267 @@ class CQLLMPipeline:
             relations=[RelationDef(**r) for r in rel_res.accepted],
             attributes=schema.attributes,
         )
+
+    # ---------- P5+ 带校验的抽取 ----------
+    def extract_events_with_verification(
+        self,
+        paragraph: str,
+        schema: TBoxSchema,
+        context_before: str = "",
+        context_after: str = "",
+        save_path: Optional[Path] = None,
+        favor_existing_classes: bool = True,
+        use_cot: bool = True,
+        strict_filter: bool = True,
+        fuzzy_threshold: float = 0.8,
+    ) -> Dict[str, Any]:
+        """
+        带原文回溯校验的知识抽取（P5 + 幻觉过滤）。
+
+        整合 CoT 约束抽取和原文回溯校验，一步完成高质量抽取。
+
+        流程：
+        1. P5: 使用 CoT Prompt 进行分步抽取（或普通 Prompt）
+        2. 清洗: 对抽取结果进行基础清洗
+        3. 幻觉过滤: 原文回溯校验，过滤不在原文中的实体
+        4. 标准化: 对保留的结果进行格式标准化
+
+        Args:
+            paragraph: 待抽取文本
+            schema: TBox Schema
+            context_before: 前文上下文（可选）
+            context_after: 后文上下文（可选）
+            save_path: 保存路径（可选）
+            favor_existing_classes: 是否优先使用现有类
+            use_cot: 是否使用 CoT Prompt（默认 True）
+            strict_filter: 是否使用严格过滤模式（仅精确匹配）
+            fuzzy_threshold: 模糊匹配阈值（0-1）
+
+        Returns:
+            包含抽取结果和验证统计的字典：
+            {
+                "events": [...],
+                "triples": [...],
+                "filtered_triples": [...],
+                "hallucination_rate": float,
+                "thought": str (CoT 模式下的思考过程),
+                "stats": {...}
+            }
+        """
+        logger.info("[P5+] 开始带校验的知识抽取...")
+
+        # 构建输入文本（带上下文标记）
+        input_text = self._format_context_input(paragraph, context_before, context_after)
+
+        # 构建 Schema JSON
+        schema_json = json.dumps(schema.to_dict(), ensure_ascii=False, indent=2)
+
+        # 构建类使用提示
+        if favor_existing_classes:
+            class_usage_hint = "优先使用 TBox 中已有的类名，不要随意创造新的事件类型；倾向用已有类 + 属性表达。"
+        else:
+            class_usage_hint = "允许充分使用 TBox 中新增的细粒度类（如新补充的 HazardFactor 子类等），鼓励细分事件类型。"
+
+        # 选择 Prompt 模板
+        thought = ""
+        if use_cot:
+            user_prompt = P5_COT_EXTRACTION_PROMPT.format(
+                schema_json=schema_json,
+                event_schema=EVENT_SCHEMA_HINT,
+                input_text=input_text,
+                class_usage_hint=class_usage_hint,
+            )
+            # CoT 模式需要特殊处理响应
+            messages = [
+                {"role": "system", "content": "你是水旱灾害知识图谱构建专家，请按照思维链格式输出。"},
+                {"role": "user", "content": user_prompt},
+            ]
+            raw_response = self.llm.chat_messages(messages, json_mode=False)
+
+            # 提取思考过程
+            thought = extract_cot_thought(raw_response)
+
+            # 解析 JSON 结果
+            res = parse_cot_response(raw_response)
+            if res is None:
+                logger.warning("[P5+] CoT 响应解析失败，返回空结果")
+                res = {"events": [], "triples": []}
+        else:
+            user_prompt = P5_EXTRACTION_PROMPT.format(
+                schema_json=schema_json,
+                event_schema=EVENT_SCHEMA_HINT,
+                input_text=input_text,
+                class_usage_hint=class_usage_hint,
+            )
+            res = self.client.call("仅输出 JSON，不要解释。", user_prompt)
+
+        # 清洗 P5 结果
+        res = self._sanitize_p5_result(res, schema)
+
+        # 幻觉过滤
+        logger.info("[P5+] 执行原文回溯校验...")
+        halluc_filter = HallucinationFilter(
+            strict_mode=strict_filter,
+            fuzzy_threshold=fuzzy_threshold,
+            verbose=True
+        )
+
+        # 合并主文本和上下文用于验证
+        verified = halluc_filter.verify(
+            extraction_result=res,
+            original_text=paragraph,
+            context_before=context_before,
+            context_after=context_after,
+        )
+
+        # 实体标准化
+        normalizer = SimpleEntityNormalizer()
+        normalized_triples = normalizer.normalize_triples(verified.valid_triples)
+
+        # 组装结果
+        result = {
+            "events": verified.valid_events,
+            "triples": normalized_triples,
+            "filtered_triples": verified.filtered_triples,
+            "hallucination_rate": verified.hallucination_rate / 100.0,  # 转为 0-1
+            "thought": thought,
+            "stats": {
+                "total_triples": verified.total_triples,
+                "valid_triples": verified.valid_count,
+                "filtered_triples": verified.filtered_count,
+                "hallucination_rate_pct": f"{verified.hallucination_rate:.2f}%",
+            },
+            "verification_log": verified.verification_log,
+        }
+
+        if save_path:
+            self._dump_json(result, save_path)
+
+        logger.info(
+            f"[P5+] 完成: 事件 {len(result['events'])} 个, "
+            f"有效三元组 {verified.valid_count}/{verified.total_triples}, "
+            f"幻觉率 {verified.hallucination_rate:.2f}%"
+        )
+
+        return result
+
+    def extract_and_fuse(
+        self,
+        paragraph: str,
+        schema: TBoxSchema,
+        context_before: str = "",
+        context_after: str = "",
+        save_path: Optional[Path] = None,
+        favor_existing_classes: bool = True,
+        use_cot: bool = True,
+        strict_filter: bool = True,
+        fuzzy_threshold: float = 0.8,
+        alias_dict: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        完整的知识抽取与融合流程（P5 + 幻觉过滤 + 知识融合）。
+
+        在 extract_events_with_verification 基础上增加：
+        - 实体归一化（使用别名字典）
+        - 关系去重（合并相同三元组，统计支持度）
+
+        Args:
+            paragraph: 待抽取文本
+            schema: TBox Schema
+            context_before: 前文上下文
+            context_after: 后文上下文
+            save_path: 保存路径
+            favor_existing_classes: 是否优先使用现有类
+            use_cot: 是否使用 CoT Prompt
+            strict_filter: 是否严格过滤
+            fuzzy_threshold: 模糊匹配阈值
+            alias_dict: 自定义别名字典（可选，默认使用内置字典）
+
+        Returns:
+            包含融合结果和统计信息的字典：
+            {
+                "events": [...],
+                "triples": [...],  # 融合后的三元组（含 support 字段）
+                "filtered_triples": [...],
+                "hallucination_rate": float,
+                "fusion_stats": {...},
+                ...
+            }
+        """
+        # 1. 执行带校验的抽取
+        extraction_result = self.extract_events_with_verification(
+            paragraph=paragraph,
+            schema=schema,
+            context_before=context_before,
+            context_after=context_after,
+            save_path=None,  # 不单独保存中间结果
+            favor_existing_classes=favor_existing_classes,
+            use_cot=use_cot,
+            strict_filter=strict_filter,
+            fuzzy_threshold=fuzzy_threshold,
+        )
+
+        # 2. 知识融合
+        logger.info("[P6] 执行知识融合...")
+        valid_triples = extraction_result.get("triples", [])
+
+        if valid_triples:
+            fused_triples, fusion_stats = fuse_knowledge(valid_triples, alias_dict)
+        else:
+            fused_triples = []
+            fusion_stats = {
+                "entity_merges": 0,
+                "original_triple_count": 0,
+                "final_triple_count": 0,
+                "reduction_rate": 0.0,
+            }
+
+        # 3. 组装最终结果
+        result = {
+            "events": extraction_result.get("events", []),
+            "triples": fused_triples,
+            "filtered_triples": extraction_result.get("filtered_triples", []),
+            "hallucination_rate": extraction_result.get("hallucination_rate", 0.0),
+            "thought": extraction_result.get("thought", ""),
+            "stats": extraction_result.get("stats", {}),
+            "fusion_stats": fusion_stats,
+            "verification_log": extraction_result.get("verification_log", []),
+        }
+
+        if save_path:
+            self._dump_json(result, save_path)
+
+        logger.info(
+            f"[P6] 知识融合完成: "
+            f"三元组 {fusion_stats.get('original_triple_count', 0)} -> {fusion_stats.get('final_triple_count', 0)}, "
+            f"缩减率 {fusion_stats.get('reduction_rate', 0):.1%}"
+        )
+
+        return result
+
+    def _format_context_input(self, main: str, before: str, after: str) -> str:
+        """
+        格式化带上下文标记的输入文本。
+
+        Args:
+            main: 主文本（待抽取）
+            before: 前文上下文
+            after: 后文上下文
+
+        Returns:
+            格式化后的文本，包含【前文参考】【待抽取文本】【后文参考】标记
+        """
+        parts = []
+
+        if before and before.strip():
+            parts.append(f"【前文参考】\n{before.strip()}")
+
+        parts.append(f"【待抽取文本】\n{main.strip()}")
+
+        if after and after.strip():
+            parts.append(f"【后文参考】\n{after.strip()}")
+
+        return "\n\n".join(parts)
 
 
 # =========================

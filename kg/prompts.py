@@ -32,7 +32,10 @@ P1_CQ_PROMPT = """
    - 不要出现“你/我/我们/系统”等对话式表述；
 3) 问题的答案应当可以通过对知识图谱进行结构化查询获得,便于后续转化为图数据库查询；
    （例如基于时间、空间、事件、致灾因子、防治措施等维度检索或统计）
-4) 覆盖风险管理周期的不同阶段，避免仅限于一般性灾害管理问题, 避免过于具体的事件细节（如某次具体洪水的精确数据）
+4) 问题应具体涉及到图谱中的实体类型，例如：
+   - 询问特定实体的属性（如：“三峡水库的汛限水位是多少？”）
+   - 询问实体间的关系（如：“哪些支流的洪水汇入导致了1998年干流高水位？”）
+   - 避免生成纯粹的定义性问题（如“什么是洪水？”），重点关注事实性、关联性问题。
 
 类别（category）说明：
 请为每个能力问题指定一个最合适的类别，用简短中文短语表示。
@@ -106,6 +109,10 @@ P2_SCHEMA_PROMPT = """
 你的任务是：
 
 1. 根据 CQ 中隐含的语义需求，归纳出候选实体类（classes）：
+   - 请严格采用“以事件为中心（Event-Centric）”的建模思路。
+     * 必须构建一个核心类（如 DisasterEvent），并围绕它构建关联类。
+     * 确保 schema 能清晰回答：一个事件发生在什么 Time（时间）、什么 Location（地点），由什么 Cause（致灾因子）引起，造成了什么 Impact（灾害影响），并采取了什么 Response（应急响应）。
+     * 避免生成孤立的、无法与事件挂钩的静态概念。
    - 每个类用英文 name（如 FloodEvent）、中文名 cn_name（如 洪水事件）和定义 (definition) 描述；
    - examples 中给出 1~3 个典型实例（中文字符串）；
    - parent 字段用于表达继承关系（可选）：
@@ -409,12 +416,14 @@ TBox 定义（classes / relations / attributes）：
    - event_type 必须使用 TBox.classes.name 中已有的某个类名，例如 "FloodEvent", "DroughtEvent"。
    - 若无法确定具体子类，可以使用更上层的类，如 "DisasterEvent"。
 
-2. 在 TBox 约束下抽取三元组（triples）：
-   - subject 和 object 通常来自【待抽取文本】，是事件名、地名、致灾因子等实体（用中文字符串表示，与原文风格一致）；
-   - predicate 必须来自 TBox.relations.name 中已有的某个关系名（如 "has_cause", "affects_region"）；
-   - 可利用前后文补充缺失信息（如年份、地点等）
-   - 可以根据需要附带 event_id（若该三元组与某个事件强相关）和 evidence（原文中的支撑句）。
-  
+2. 针对 TBox 中定义的以下核心关系，请逐一扫描文本，寻找符合条件的实体对：
+   (1) has_cause (致灾因子): 寻找 [灾害事件] -> [致灾因子]
+   (2) affects_region (影响区域): 寻找 [灾害事件] -> [行政区/流域]
+   (3) triggers_response (触发响应): 寻找 [灾害事件/水位] -> [应急响应]
+   ... (列出所有关键关系)
+
+   对于每种关系，如果文中存在明确证据，请生成三元组；如果不存在，请跳过该关系。
+   不要编造文中未提及的关系。
 ---
 
 输入文本:
@@ -920,3 +929,243 @@ def build_p5_extraction_prompt(
         context_after=context_after,
         class_usage_hint=class_hint,
     )
+
+
+# ========== P5：事件与三元组抽取（CoT增强版） ==========
+P5_COT_EXTRACTION_PROMPT = """
+你是一名水旱灾害知识图谱构建专家。
+
+TBox 定义（classes / relations / attributes）：
+{schema_json}
+
+事件 Schema 参考：
+{event_schema}
+
+---
+
+【重要说明】
+
+输入文本可能包含三个部分：
+1. 【前文参考】：提供上下文背景
+2. 【待抽取文本】：**主要抽取目标**
+3. 【后文参考】：提供后续上下文
+
+---
+
+【核心约束 - 请务必遵守】
+
+1. **所有抽取的实体必须是原文的子串**，不可改写、推断或编造
+2. 关系必须来自Schema定义的relations列表，不可自创
+3. 如果文本中找不到相关信息，返回空列表而非编造
+
+---
+
+请按照以下步骤进行**逐步推理（Chain of Thought）**：
+
+**Step 1: 实体扫描与定位**
+仔细阅读【待抽取文本】，识别所有可能属于TBox类别的实体（如时间、地点、河流、数值、灾害名等）。
+*自我验证*：逐一检查这些实体是否在原文中**原样出现**？如果不是原文子串，请修正为原文表述或丢弃。
+
+**Step 2: 事件识别与分类**
+判断文本是否描述了具体灾害事件，确定事件类型。
+类使用提示：{class_usage_hint}
+
+**Step 3: 关系判断与Schema约束**
+对于识别出的实体对，判断它们之间是否存在TBox定义的关系。
+检查：
+- 关系predicate是否在TBox.relations.name列表中？
+- 关系的subject和object类型是否符合domain/range约束？
+- *去幻觉*：这条关系在原文中有明确的句子支持吗？如果没有，请丢弃。
+
+**Step 4: 三元组组装与证据标注**【核心步骤】
+将验证通过的实体和关系组装为规范化JSON格式。
+为每个三元组标注evidence字段（从原文复制支撑该关系的句子片段）。
+- 如果找不到明确的原文依据，请**丢弃**该三元组
+- 实体名称必须与原文**完全一致**，不可改写或推断
+
+---
+
+输入文本:
+{input_text}
+
+---
+
+输出格式要求：
+
+1. **请先输出思考过程**（以"【思考过程】"开头），简述你识别到的关键实体和推理逻辑（50-100字即可）。
+2. 然后输出一个JSON对象（以```json开头），包含"events"和"triples"字段。
+3. JSON结构必须严格符合以下定义：
+
+```json
+{{
+  "events": [
+    {{
+      "event_id": "evt_年份_序号",
+      "event_type": "TBox中的类名（如FloodEvent）",
+      "name": "事件中文名称",
+      "time": {{"start_time": "YYYY-MM-DD或空字符串", "end_time": "YYYY-MM-DD或空字符串"}},
+      "space": {{
+        "main_stream": ["主要干流"],
+        "tributaries": ["受影响支流或湖泊"],
+        "provinces": ["主要受灾省份"]
+      }},
+      "causes": ["致灾因子列表"],
+      "impacts": {{
+        "affected_population": "受灾人口（原文表述）",
+        "deaths": "死亡人数（原文表述）",
+        "direct_economic_loss": "直接经济损失（原文表述）"
+      }},
+      "responses": [{{"stage": "应急响应", "measures": ["措施列表"]}}],
+      "source": "数据来源"
+    }}
+  ],
+  "triples": [
+    {{
+      "subject": "实体名（必须是原文子串）",
+      "predicate": "关系名（必须来自TBox.relations）",
+      "object": "实体名（必须是原文子串）",
+      "event_id": "关联的事件ID或空字符串",
+      "evidence": "支撑该三元组的原文句子片段"
+    }}
+  ]
+}}
+```
+
+请开始推理：
+"""
+
+
+# ==============================================================================
+# CoT响应解析工具
+# ==============================================================================
+
+import json
+import re
+from typing import Dict, Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def parse_cot_response(response_text: str) -> Optional[Dict]:
+    """
+    解析带有CoT思考过程的LLM响应
+
+    处理逻辑：
+    1. 尝试提取```json代码块中的内容
+    2. 如果没有代码块，尝试找{...}
+    3. 解析JSON并返回
+    4. 解析失败返回None
+
+    Args:
+        response_text: LLM的原始响应文本
+
+    Returns:
+        解析后的字典，包含events和triples字段
+        解析失败返回None
+    """
+    if not response_text:
+        return None
+
+    # 1. 尝试提取```json代码块
+    json_match = re.search(r"```json\s*(.*?)\s*```", response_text, re.DOTALL)
+
+    if json_match:
+        json_str = json_match.group(1)
+    else:
+        # 2. 尝试提取```代码块（不带json标记）
+        code_match = re.search(r"```\s*(.*?)\s*```", response_text, re.DOTALL)
+        if code_match:
+            json_str = code_match.group(1)
+        else:
+            # 3. 尝试找{...}
+            start = response_text.find("{")
+            end = response_text.rfind("}") + 1
+            if start != -1 and end > start:
+                json_str = response_text[start:end]
+            else:
+                return None
+
+    try:
+        data = json.loads(json_str.strip())
+        return data
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse JSON: {json_str[:200]}... Error: {e}")
+        return None
+
+
+def extract_cot_thought(response_text: str) -> str:
+    """
+    提取CoT思考过程
+
+    Args:
+        response_text: LLM的原始响应文本
+
+    Returns:
+        思考过程字符串，无则返回空字符串
+    """
+    if not response_text:
+        return ""
+
+    # 查找【思考过程】标记后的内容
+    match = re.search(r"【思考过程】(.*?)(?=```|$)", response_text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+class P5CotPromptBuilder:
+    """
+    P5 CoT 提示词构建器。
+
+    提供CoT版本的提示词构建和响应解析功能。
+    """
+
+    @classmethod
+    def build_p5_cot_prompt(
+        cls,
+        schema_json: str,
+        input_text: str,
+        context_before: str = "",
+        context_after: str = "",
+        class_usage_hint: str = "",
+        event_schema: str = "",
+    ) -> str:
+        """
+        构建完整的 P5 CoT 抽取提示词。
+
+        Args:
+            schema_json: TBox 定义 JSON
+            input_text: 主文本
+            context_before: 前文上下文
+            context_after: 后文上下文
+            class_usage_hint: 类使用提示
+            event_schema: 事件 Schema 参考
+
+        Returns:
+            格式化后的CoT提示词
+        """
+        # 格式化输入文本
+        formatted_input = P5PromptBuilder.format_input_text(
+            main_text=input_text,
+            context_before=context_before,
+            context_after=context_after,
+        )
+
+        # 填充模板
+        return P5_COT_EXTRACTION_PROMPT.format(
+            schema_json=schema_json,
+            event_schema=event_schema or EVENT_SCHEMA_HINT,
+            class_usage_hint=class_usage_hint or "请根据 TBox 中定义的类进行分类",
+            input_text=formatted_input,
+        )
+
+    @classmethod
+    def parse_response(cls, response_text: str) -> Optional[Dict]:
+        """解析CoT响应"""
+        return parse_cot_response(response_text)
+
+    @classmethod
+    def extract_thought(cls, response_text: str) -> str:
+        """提取思考过程"""
+        return extract_cot_thought(response_text)
