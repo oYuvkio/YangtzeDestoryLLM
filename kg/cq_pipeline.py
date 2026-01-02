@@ -86,6 +86,41 @@ class TBoxSchema:
             "attributes": [asdict(a) for a in self.attributes],
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "TBoxSchema":
+        """从字典构建 TBoxSchema。"""
+        def pick(d: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
+            return {k: d.get(k) for k in keys if k in d}
+
+        class_keys = ["name", "cn_name", "definition", "examples", "parent"]
+        rel_keys = ["name", "cn_name", "domain", "range", "definition", "functional"]
+        attr_keys = ["owner", "name", "cn_name", "value_type"]
+
+        classes = [
+            ClassDef(**pick(c, class_keys))
+            for c in data.get("classes", []) or []
+            if c.get("name")
+        ]
+        relations = [
+            RelationDef(**pick(r, rel_keys))
+            for r in data.get("relations", []) or []
+            if r.get("name") and r.get("domain") and r.get("range")
+        ]
+        attributes = [
+            AttributeDef(**pick(a, attr_keys))
+            for a in data.get("attributes", []) or []
+            if a.get("owner") and a.get("name")
+        ]
+
+        return cls(classes=classes, relations=relations, attributes=attributes)
+
+    @classmethod
+    def load_from_file(cls, file_path: Path) -> "TBoxSchema":
+        """从JSON文件加载TBoxSchema。"""
+        with file_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return cls.from_dict(data)
+
 
 # =========================
 # LLM 调用助手
