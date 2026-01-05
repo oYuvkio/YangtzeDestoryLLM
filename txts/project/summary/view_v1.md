@@ -454,6 +454,100 @@ entity_fusion:
 | 版本 | 日期 | 更新内容 |
 |------|------|----------|
 | v1.0 | 2026-01-02 | 初始版本，包含完整的P1-P6+流程 |
+| v1.1 | 2026-01-05 | 添加踩坑总结和注意事项 |
+
+---
+
+## 十、踩坑总结与注意事项
+
+### 10.1 数据处理踩坑
+
+#### 坑1：文本截断导致信息丢失
+
+**问题描述**：
+- `test_final.jsonl` 中的 `source_text` 字段是截断的（约500字符）
+- 完整文本存储在 `pool_v3.jsonl` 的 `text` 字段中（通过 `doc_id` → `id` 映射）
+- 如果 Pred 抽取使用截断文本，而 Gold 标注使用完整文本，会导致评测指标严重偏低
+
+**发现过程**：
+```python
+# 验证发现
+test_final.source_text: 503 字符（截断，末尾有"..."）
+pool_v3.text: 816 字符（完整）
+```
+
+**解决方案**：
+- 为所有抽取脚本添加 `--text-source` 参数
+- 运行时指定完整文本来源文件
+- 脚本会通过 `doc_id` 映射获取完整文本
+
+**涉及脚本**：
+| 脚本 | 用途 | 参数 |
+|------|------|------|
+| `scripts/generate_gold_with_tbox.py` | Gold 标注生成 | `--text-source` |
+| `scripts/p5/run_extraction_on_test.py` | Pred 抽取 | `--text-source` |
+| `scripts/p5/run_gold_annotation.sh` | Gold 生成封装 | `--text-source` |
+| `scripts/p5/run_single_model.sh` | 单模型评测 | `--text-source` |
+
+**正确用法**：
+```bash
+# Gold 生成（使用完整文本）
+bash scripts/p5/run_gold_annotation.sh \
+    --tbox-version s2 \
+    --input data/p5_eval_pool/final/test_final.jsonl \
+    --text-source data/p5_eval_pool/pool_v3.jsonl \
+    --output data/p5_eval_pool/gold_s2_tbox.jsonl \
+    ...
+
+# Pred 抽取（使用完整文本）
+bash scripts/p5/run_single_model.sh \
+    --model "THUDM/GLM-4-9B-0414" \
+    --text-source data/p5_eval_pool/pool_v3.jsonl \
+    ...
+```
+
+#### 坑2：Gold Schema ≠ TBox Schema
+
+**问题描述**：
+- 独立 Schema 的 Gold 标注使用通用关系（如 `has_value`, `located_in`）
+- TBox 定义的关系可能不同（如 `observes_value`, `located_at`）
+- Schema 不一致导致 Triple F1 极低（~4%）
+
+**解决方案**：
+- 使用 **TBox 约束的 Gold 生成**（`--tbox-version s2/s3`）
+- Gold 和 Pred 必须配对使用相同的 TBox
+  - `gold_s2.jsonl` + `pred_s2.jsonl` + `tbox_s2_optimized.json`
+  - `gold_s3.jsonl` + `pred_s3.jsonl` + `tbox_s3_optimized.json`
+
+### 10.2 评测流程注意事项
+
+#### 注意1：TBox 版本配对
+
+| Gold 文件 | Pred 文件 | TBox 文件 | 说明 |
+|-----------|-----------|-----------|------|
+| `gold_s2_tbox.jsonl` | `predictions_s2.jsonl` | `tbox_s2_optimized.json` | S2 版本配对 |
+| `gold_s3_tbox.jsonl` | `predictions_s3.jsonl` | `tbox_s3_optimized.json` | S3 版本配对 |
+
+#### 注意2：文本一致性
+
+Gold 和 Pred 必须基于**相同的完整文本**抽取：
+- 都使用 `--text-source pool_v3.jsonl`
+- 或都使用截断的 `source_text`（不推荐）
+
+#### 注意3：默认 TBox 路径更新
+
+所有脚本的默认 TBox 已更新为优化版本：
+- 旧路径：`p4_tbox_dedup_s2_allow1_20260102_*.json`
+- 新路径：`tbox_s2_optimized.json` / `tbox_s3_optimized.json`
+
+### 10.3 常见问题排查
+
+| 问题现象 | 可能原因 | 排查方法 |
+|---------|---------|---------|
+| Triple F1 < 10% | Schema 不一致 | 检查 Gold/Pred 是否使用相同 TBox |
+| Recall 极低 | 文本截断 | 检查是否使用了 `--text-source` |
+| 大量"主语未在原文中找到" | 文本不匹配 | 检查 Gold/Pred 是否基于相同文本 |
+| 关系全部不匹配 | TBox 版本错误 | 确认 s2/s3 版本配对 |
 
 ---
 

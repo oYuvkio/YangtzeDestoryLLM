@@ -54,15 +54,29 @@ def _normalize_text(text: str) -> str:
     return text.lower()
 
 
-def _ensure_records(obj: Any) -> Dict[str, List[Dict[str, Any]]]:
+def _ensure_records(obj: Any, *, use_original_type: bool = False) -> Dict[str, List[Dict[str, Any]]]:
     """
     将输入统一转换为 {events: [...], triples: [...]} 结构。
     - 若 obj 是 dict，直接返回其中 events/triples 字段（不存在则空列表）。
     - 若 obj 是 list，假定列表元素为 dict，分别汇总 events/triples。
     """
+    def _normalize_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not use_original_type:
+            return events
+        normalized: List[Dict[str, Any]] = []
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            raw_type = ev.get("original_event_type") or ev.get("event_type", "")
+            ev_copy = dict(ev)
+            ev_copy["event_type"] = raw_type
+            normalized.append(ev_copy)
+        return normalized
+
     if isinstance(obj, dict):
+        events = obj.get("events", []) or obj.get("gold_events", []) or []
         return {
-            "events": obj.get("events", []) or obj.get("gold_events", []) or [],
+            "events": _normalize_events(events),
             "triples": obj.get("triples", []) or obj.get("gold_triples", []) or [],
         }
     if isinstance(obj, list):
@@ -72,10 +86,20 @@ def _ensure_records(obj: Any) -> Dict[str, List[Dict[str, Any]]]:
                 continue
             e = item.get("events", []) or item.get("gold_events", []) or []
             t = item.get("triples", []) or item.get("gold_triples", []) or []
-            events.extend(e)
+            events.extend(_normalize_events(e))
             triples.extend(t)
         return {"events": events, "triples": triples}
     return {"events": [], "triples": []}
+
+
+def _calc_prf(tp: int, pred_total: int, gold_total: int) -> ExtractionMetrics:
+    """统一计算 Precision / Recall / F1。"""
+    if pred_total == 0 and gold_total == 0:
+        return ExtractionMetrics(precision=1.0, recall=1.0, f1=1.0)
+    precision = tp / pred_total if pred_total > 0 else 0.0
+    recall = tp / gold_total if gold_total > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    return ExtractionMetrics(precision=precision, recall=recall, f1=f1)
 
 
 def _extract_event_keys(events: List[Dict[str, Any]]) -> Set[str]:
@@ -297,16 +321,38 @@ def _canonicalize_geo(text: str, alias_to_canonical: Dict[str, str]) -> str:
     return alias_to_canonical.get(normalized, normalized)
 
 
+def _fuzzy_entity_match(pred_norm: str, gold_norm: str, threshold: float = 0.7) -> bool:
+    """
+    模糊实体匹配：
+    1. 子串匹配（一方包含另一方）
+    2. 字符相似度匹配
+    """
+    if not pred_norm or not gold_norm:
+        return False
+
+    # 子串匹配（长度 >= 2 才允许）
+    if len(pred_norm) >= 2 and len(gold_norm) >= 2:
+        if pred_norm in gold_norm or gold_norm in pred_norm:
+            return True
+
+    # 字符相似度匹配
+    from difflib import SequenceMatcher
+    ratio = SequenceMatcher(None, pred_norm, gold_norm).ratio()
+    return ratio >= threshold
+
+
 def _entities_match_relaxed(
     pred_entity: str,
     gold_entity: str,
     tolerance_days: int,
     geo_alias_to_canonical: Dict[str, str],
+    fuzzy_threshold: float = 0.7,
 ) -> Tuple[bool, Optional[str]]:
     """
     relaxed 实体等价：
     - 若双方都是日期：允许 ±N 天
-    - 否则按 geo 同义/上位归一化后严格比较
+    - 否则按 geo 同义/上位归一化后比较
+    - 支持子串匹配和模糊匹配
     返回 (是否匹配, mismatch_type)
     """
     pred_date = _parse_iso_date(pred_entity)
@@ -315,10 +361,19 @@ def _entities_match_relaxed(
         if abs((pred_date - gold_date).days) <= max(0, tolerance_days):
             return True, None
         return False, "time_mismatch"
+
+    # 归一化后精确匹配
     pred_geo = _canonicalize_geo(pred_entity, geo_alias_to_canonical)
     gold_geo = _canonicalize_geo(gold_entity, geo_alias_to_canonical)
     if pred_geo == gold_geo:
         return True, None
+
+    # 模糊匹配（子串 + 相似度）
+    pred_norm = _normalize_text(pred_entity)
+    gold_norm = _normalize_text(gold_entity)
+    if _fuzzy_entity_match(pred_norm, gold_norm, fuzzy_threshold):
+        return True, None
+
     if pred_entity or gold_entity:
         return False, "geo_mismatch"
     return False, "other_mismatch"
@@ -331,29 +386,32 @@ def compute_event_f1(
     predictions: Any,
     gold: Any,
     time_tolerance_days: int = 0,
-) -> Tuple[float, Dict[str, int]]:
+    use_original_type: bool = False,
+) -> Tuple[ExtractionMetrics, Dict[str, int]]:
     """
     计算事件抽取 F1，基于事件名称+类型匹配。
     支持输入 dict 或 list（批量）。
     新口径：在名称/类型一致的基础上加入时间窗容忍。
-    返回 (f1, error_breakdown)。
+    返回 (metrics, error_breakdown)。
     """
-    pred_records = _ensure_records(predictions)
+    pred_records = _ensure_records(predictions, use_original_type=use_original_type)
     gold_records = _ensure_records(gold)
 
     pred_events = pred_records["events"]
     gold_events = gold_records["events"]
 
     if not pred_events and not gold_events:
-        return 1.0, {"matched": 0, "unmatched_pred": 0, "unmatched_gold": 0}
+        return _calc_prf(0, 0, 0), {"matched": 0, "unmatched_pred": 0, "unmatched_gold": 0}
     if not pred_events or not gold_events:
-        return 0.0, {"matched": 0, "unmatched_pred": len(pred_events), "unmatched_gold": len(gold_events)}
+        return _calc_prf(0, len(pred_events), len(gold_events)), {
+            "matched": 0,
+            "unmatched_pred": len(pred_events),
+            "unmatched_gold": len(gold_events),
+        }
 
     tp, error_breakdown = _match_events_with_tolerance(pred_events, gold_events, time_tolerance_days)
-    precision = tp / len(pred_events) if pred_events else 0.0
-    recall = tp / len(gold_events) if gold_events else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-    return round(f1, 4), error_breakdown
+    metrics = _calc_prf(tp, len(pred_events), len(gold_events))
+    return metrics, error_breakdown
 
 
 def compute_triple_f1(
@@ -361,12 +419,12 @@ def compute_triple_f1(
     gold: Any,
     time_tolerance_days: int = 0,
     geo_synonyms: Optional[str] = None,
-) -> Tuple[Dict[str, float], Dict[str, int]]:
+) -> Tuple[Dict[str, ExtractionMetrics], Dict[str, int]]:
     """
     计算三元组抽取 F1。
     - strict=True : (s,p,o) 完全一致
     - relaxed     : predicate 一致，subject/object 允许时间±N日、地名同义/上位归一
-    返回 ({strict, relaxed}, error_breakdown)。
+    返回 ({strict, relaxed}, error_breakdown)，各自包含 precision/recall/f1。
     """
     pred_records = _ensure_records(predictions)
     gold_records = _ensure_records(gold)
@@ -379,15 +437,8 @@ def compute_triple_f1(
     pred_strict = _extract_triple_keys(pred_triples, strict=True)
     gold_strict = _extract_triple_keys(gold_triples, strict=True)
 
-    if not pred_strict and not gold_strict:
-        f1_strict = 1.0
-    elif not pred_strict or not gold_strict:
-        f1_strict = 0.0
-    else:
-        tp_s = len(pred_strict & gold_strict)
-        p_s = tp_s / len(pred_strict) if pred_strict else 0.0
-        r_s = tp_s / len(gold_strict) if gold_strict else 0.0
-        f1_strict = 2 * p_s * r_s / (p_s + r_s) if (p_s + r_s) > 0 else 0.0
+    tp_s = len(pred_strict & gold_strict)
+    strict_metrics = _calc_prf(tp_s, len(pred_strict), len(gold_strict))
 
     error_breakdown: Dict[str, int] = {
         "strict_matched": len(pred_strict & gold_strict),
@@ -447,26 +498,26 @@ def compute_triple_f1(
     error_breakdown["unmatched_gold"] = max(0, len(gold_triples) - len(used_gold_indices))
 
     tp_relaxed = error_breakdown["relaxed_matched"]
-    p_r = tp_relaxed / len(pred_triples) if pred_triples else 0.0
-    r_r = tp_relaxed / len(gold_triples) if gold_triples else 0.0
-    f1_relaxed = 2 * p_r * r_r / (p_r + r_r) if (p_r + r_r) > 0 else 0.0
+    relaxed_metrics = _calc_prf(tp_relaxed, len(pred_triples), len(gold_triples))
 
     return {
-        "strict": round(f1_strict, 4),
-        "relaxed": round(f1_relaxed, 4),
+        "strict": strict_metrics,
+        "relaxed": relaxed_metrics,
     }, error_breakdown
 
 
 def compute_tbox_consistency(
     predictions: Any,
     tbox: Dict[str, Any],
+    *,
+    use_original_type: bool = False,
 ) -> Tuple[float, Dict[str, int]]:
     """
     计算三元组与 TBox 的一致率：
     1) predicate 是否在 TBox 定义中
     2) 可推断 subject/object 类型时，domain/range 是否匹配
     """
-    pred_records = _ensure_records(predictions)
+    pred_records = _ensure_records(predictions, use_original_type=use_original_type)
     triples = pred_records["triples"]
     if not triples:
         return 1.0, {"total": 0, "predicate_unknown": 0, "domain_range_violations": 0}
@@ -545,6 +596,83 @@ def compute_tbox_consistency(
     }
 
 
+def _iter_records(obj: Any) -> List[Dict[str, Any]]:
+    if isinstance(obj, list):
+        return [r for r in obj if isinstance(r, dict)]
+    if isinstance(obj, dict):
+        return [obj]
+    return []
+
+
+def compute_hallucination_rate(predictions: Any) -> Dict[str, Any]:
+    """计算幻觉率：被过滤三元组数 / 原始三元组数（仅当有校验信息时）。"""
+    total = 0
+    filtered = 0
+    has_data = False
+
+    for record in _iter_records(predictions):
+        meta = record.get("_meta_hallucination")
+        if isinstance(meta, dict) and meta.get("is_filtered") is True:
+            orig = meta.get("original_count", 0)
+            filt = meta.get("filtered_count", 0)
+            if isinstance(orig, int) and isinstance(filt, int) and orig > 0:
+                total += orig
+                filtered += filt
+                has_data = True
+                continue
+
+        stats = record.get("stats")
+        if isinstance(stats, dict):
+            orig = stats.get("total_triples")
+            filt = stats.get("filtered_triples")
+            if isinstance(orig, int) and isinstance(filt, int) and orig > 0:
+                total += orig
+                filtered += filt
+                has_data = True
+                continue
+
+        rate = record.get("hallucination_rate")
+        if isinstance(rate, (int, float)):
+            triples = record.get("triples", []) or []
+            orig = len(triples)
+            if orig > 0:
+                total += orig
+                filtered += int(round(rate * orig))
+                has_data = True
+
+    if not has_data:
+        return {"hallucination_rate": None, "total": 0, "filtered": 0}
+    rate = filtered / total if total > 0 else 0.0
+    return {"hallucination_rate": round(rate, 4), "total": total, "filtered": filtered}
+
+
+def compute_entity_redundancy_rate(predictions: Any) -> Dict[str, Any]:
+    """基于三元组实体统计冗余率（重复实体占比）。"""
+    pred_records = _ensure_records(predictions)
+    triples = pred_records["triples"]
+    entities: List[str] = []
+    for triple_item in triples:
+        if not isinstance(triple_item, dict):
+            continue
+        subject = triple_item.get("subject", "")
+        obj = triple_item.get("object", "")
+        if subject:
+            entities.append(str(subject))
+        if obj:
+            entities.append(str(obj))
+
+    total = len(entities)
+    unique = len({_normalize_text(e) for e in entities if e})
+    redundant = max(0, total - unique)
+    rate = redundant / total if total > 0 else 0.0
+    return {
+        "entity_redundancy_rate": round(rate, 4),
+        "total": total,
+        "unique": unique,
+        "redundant": redundant,
+    }
+
+
 def compute_full_metrics(
     predictions: Any,
     gold: Any,
@@ -552,6 +680,7 @@ def compute_full_metrics(
     *,
     time_tolerance_days: int = 0,
     geo_synonyms: Optional[str] = None,
+    use_original_type: bool = False,
 ) -> Dict[str, Any]:
     """
     一次性返回全量指标，便于实验脚本直接调用。
@@ -559,29 +688,47 @@ def compute_full_metrics(
         - event_f1
         - triple_f1_strict / triple_f1_relaxed
         - tbox_consistency
+        - event_metrics / triple_metrics_strict / triple_metrics_relaxed
+        - hallucination_rate
+        - entity_redundancy_rate
         - 预测/标注的事件、三元组数量
         - error_breakdown
     """
-    event_f1, event_errors = compute_event_f1(
-        predictions, gold, time_tolerance_days=time_tolerance_days
+    event_metrics, event_errors = compute_event_f1(
+        predictions,
+        gold,
+        time_tolerance_days=time_tolerance_days,
+        use_original_type=use_original_type,
     )
     triple_f1, triple_errors = compute_triple_f1(
         predictions, gold, time_tolerance_days=time_tolerance_days, geo_synonyms=geo_synonyms
     )
-    tbox_consist, tbox_errors = compute_tbox_consistency(predictions, tbox)
+    tbox_consist, tbox_errors = compute_tbox_consistency(
+        predictions, tbox, use_original_type=use_original_type
+    )
 
     pred_records = _ensure_records(predictions)
     gold_records = _ensure_records(gold)
+    hallucination_stats = compute_hallucination_rate(predictions)
+    redundancy_stats = compute_entity_redundancy_rate(predictions)
 
     return {
-        "event_f1": event_f1,
-        "triple_f1_strict": triple_f1["strict"],
-        "triple_f1_relaxed": triple_f1["relaxed"],
+        "use_original_type": use_original_type,
+        "event_f1": round(event_metrics.f1, 4),
+        "triple_f1_strict": round(triple_f1["strict"].f1, 4),
+        "triple_f1_relaxed": round(triple_f1["relaxed"].f1, 4),
+        "event_metrics": event_metrics.to_dict(),
+        "triple_metrics_strict": triple_f1["strict"].to_dict(),
+        "triple_metrics_relaxed": triple_f1["relaxed"].to_dict(),
         "tbox_consistency": tbox_consist,
+        "hallucination_rate": hallucination_stats["hallucination_rate"],
+        "entity_redundancy_rate": redundancy_stats["entity_redundancy_rate"],
         "num_pred_events": len(pred_records["events"]),
         "num_gold_events": len(gold_records["events"]),
         "num_pred_triples": len(pred_records["triples"]),
         "num_gold_triples": len(gold_records["triples"]),
+        "hallucination_stats": hallucination_stats,
+        "entity_redundancy_stats": redundancy_stats,
         "error_breakdown": {
             "events": event_errors,
             "triples": triple_errors,
@@ -634,6 +781,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tbox", required=True, help="TBox 路径（json）")
     parser.add_argument("--time-tolerance-days", type=int, default=0, help="时间容忍天数（默认 0）")
     parser.add_argument("--geo-syn", default="", help="地名同义/上位映射 json 文件（可选）")
+    parser.add_argument(
+        "--use-original-type",
+        action="store_true",
+        help="使用原始 event_type 进行评测（忽略回退逻辑）",
+    )
     parser.add_argument("--out", required=True, help="输出指标 JSON 路径")
     parser.add_argument("--log-file", default="", help="日志文件（可选）")
     return parser.parse_args()
@@ -662,6 +814,7 @@ def main() -> None:
                     tbox,
                     time_tolerance_days=args.time_tolerance_days,
                     geo_synonyms=args.geo_syn,
+                    use_original_type=args.use_original_type,
                 )
             )
         # 聚合平均
@@ -676,11 +829,34 @@ def main() -> None:
                     total_counts[key] = total_counts.get(key, 0) + int(value)
             return total_counts
 
+        hallucination_stats = compute_hallucination_rate(preds)
+        redundancy_stats = compute_entity_redundancy_rate(preds)
+
         report = {
+            "use_original_type": args.use_original_type,
             "event_f1": round(mean([m["event_f1"] for m in all_metrics]), 4),
             "triple_f1_strict": round(mean([m["triple_f1_strict"] for m in all_metrics]), 4),
             "triple_f1_relaxed": round(mean([m["triple_f1_relaxed"] for m in all_metrics]), 4),
+            "event_metrics": {
+                "precision": round(mean([m["event_metrics"]["precision"] for m in all_metrics]), 4),
+                "recall": round(mean([m["event_metrics"]["recall"] for m in all_metrics]), 4),
+                "f1": round(mean([m["event_metrics"]["f1"] for m in all_metrics]), 4),
+            },
+            "triple_metrics_strict": {
+                "precision": round(mean([m["triple_metrics_strict"]["precision"] for m in all_metrics]), 4),
+                "recall": round(mean([m["triple_metrics_strict"]["recall"] for m in all_metrics]), 4),
+                "f1": round(mean([m["triple_metrics_strict"]["f1"] for m in all_metrics]), 4),
+            },
+            "triple_metrics_relaxed": {
+                "precision": round(mean([m["triple_metrics_relaxed"]["precision"] for m in all_metrics]), 4),
+                "recall": round(mean([m["triple_metrics_relaxed"]["recall"] for m in all_metrics]), 4),
+                "f1": round(mean([m["triple_metrics_relaxed"]["f1"] for m in all_metrics]), 4),
+            },
             "tbox_consistency": round(mean([m["tbox_consistency"] for m in all_metrics]), 4),
+            "hallucination_rate": hallucination_stats["hallucination_rate"],
+            "entity_redundancy_rate": redundancy_stats["entity_redundancy_rate"],
+            "hallucination_stats": hallucination_stats,
+            "entity_redundancy_stats": redundancy_stats,
             "sample_count": pair_count,
             "error_breakdown": {
                 "events": sum_breakdown([m["error_breakdown"]["events"] for m in all_metrics]),
@@ -695,6 +871,7 @@ def main() -> None:
             tbox,
             time_tolerance_days=args.time_tolerance_days,
             geo_synonyms=args.geo_syn,
+            use_original_type=args.use_original_type,
         )
 
     out_path = Path(args.out)

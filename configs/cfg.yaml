@@ -30,7 +30,7 @@ llm:
   #"LongCat-Flash-Chat"               # 模型名称
   temperature: 0.1                        # 温度参数
   max_retries: 2                          # 重试次数
-  timeout: 180                             # 超时时间（秒）
+  timeout: 360                             # 超时时间（秒）
   #max_tokens: 8192                        # LongCat 默认需要指定
   #enable_thinking: false                  # 是否启用思考模式（需使用 LongCat-Flash-Thinking 模型）
   request_mode: post

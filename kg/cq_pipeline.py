@@ -529,10 +529,12 @@ class CQLLMPipeline:
         schema: TBoxSchema,
         save_path: Optional[Path] = None,
         favor_existing_classes: bool = True,
+        use_cot: bool = False,
     ) -> Dict[str, Any]:
         """
         在 TBox 约束下抽取事件与三元组。
         favor_existing_classes=True 时，提示尽量复用已有类；False 时鼓励使用新增细粒度类。
+        use_cot=True 时，使用 CoT Prompt 并解析思维链结果。
         """
         schema_json = json.dumps(
             schema.to_dict(), ensure_ascii=False, indent=2)
@@ -540,14 +542,37 @@ class CQLLMPipeline:
             class_usage_hint = "优先使用 TBox 中已有的类名，不要随意创造新的事件类型；倾向用已有类 + 属性表达。"
         else:
             class_usage_hint = "允许充分使用 TBox 中新增的细粒度类（如新补充的 HazardFactor 子类等），鼓励细分事件类型。"
-        user_prompt = P5_EXTRACTION_PROMPT.format(
-            schema_json=schema_json,
-            event_schema=EVENT_SCHEMA_HINT,
-            input_text=paragraph.strip(),
-            class_usage_hint=class_usage_hint,
-        )
-        res = self.client.call("仅输出 JSON，不要解释。", user_prompt)
+
+        thought = ""
+        if use_cot:
+            user_prompt = P5_COT_EXTRACTION_PROMPT.format(
+                schema_json=schema_json,
+                event_schema=EVENT_SCHEMA_HINT,
+                input_text=paragraph.strip(),
+                class_usage_hint=class_usage_hint,
+            )
+            messages = [
+                {"role": "system", "content": "你是水旱灾害知识图谱构建专家，请按照思维链格式输出。"},
+                {"role": "user", "content": user_prompt},
+            ]
+            raw_response = self.llm.chat_messages(messages, json_mode=False)
+            thought = extract_cot_thought(raw_response)
+            res = parse_cot_response(raw_response)
+            if res is None:
+                logger.warning("[P5] CoT 响应解析失败，返回空结果")
+                res = {"events": [], "triples": []}
+        else:
+            user_prompt = P5_EXTRACTION_PROMPT.format(
+                schema_json=schema_json,
+                event_schema=EVENT_SCHEMA_HINT,
+                input_text=paragraph.strip(),
+                class_usage_hint=class_usage_hint,
+            )
+            res = self.client.call("仅输出 JSON，不要解释。", user_prompt)
+
         res = self._sanitize_p5_result(res, schema)
+        if use_cot and thought:
+            res["thought"] = thought
         if save_path:
             self._dump_json(res, save_path)
         return res
@@ -588,9 +613,14 @@ class CQLLMPipeline:
             ev.setdefault("name", "")
             ev.setdefault("source", "")
 
-            if allowed_event_types and ev["event_type"] not in allowed_event_types:
+            raw_event_type = ev.get("event_type", "")
+            ev["original_event_type"] = raw_event_type
+            if allowed_event_types and raw_event_type not in allowed_event_types:
                 invalid_event_type_count += 1
-                ev["event_type"] = fallback_event_type or ev["event_type"]
+                ev["event_type"] = fallback_event_type or raw_event_type
+                ev["_is_fallback"] = True
+            else:
+                ev["_is_fallback"] = False
 
             time_block = ev.get("time")
             if not isinstance(time_block, dict):

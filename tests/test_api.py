@@ -20,9 +20,9 @@ from typing import Optional
 # 配置
 # =============================================================================
 # 【直接修改这里来配置 API Key、URL 和模型】
-API_KEY = "sk-ZsW81LLT3Pv16LpkJYGngngk4VRrKuLeSDapEHTTuFuQBz6J"  # 直接在这里填入你的 API Key
-DEFAULT_BASE_URL = "https://api.uglycat.cc/v1"  # 修改这里来测试不同的 URL
-DEFAULT_MODEL = "gemini-3-flash-preview"  # 修改这里来测试不同的模型
+API_KEY = "sk-hOfQ8WeWtjmRlvKe4unY7ypeFnmEI6YTOrpeqxp8rmrEQZYz"  # 直接在这里填入你的 API Key
+DEFAULT_BASE_URL = "https://llm.undefined.qzz.io/v1"  # 修改这里来测试不同的 URL
+DEFAULT_MODEL = "glm-4.7"  # 修改这里来测试不同的模型
 
 TEST_PROMPT = "你好，你是什么模型？你是什么版本的？"
 DEFAULT_ENABLE_THINKING=False

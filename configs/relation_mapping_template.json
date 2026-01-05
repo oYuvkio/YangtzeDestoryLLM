@@ -1,0 +1,45 @@
+{
+  "relation_mapping": {
+    "affects": "affects_region",
+    "part_of": "located_in",
+    "has_cause": "has_hazard_factor",
+    "triggers": "triggers_response",
+    "mitigates": "implements_measure",
+    "resolves": "implements_measure",
+    "reduces": "implements_measure",
+    "protects": "protects_region",
+    "flows_through": "flows_into",
+    "connects_to": "connects_lake",
+    "serves_area": "serves_region",
+    "monitors": "monitors_river",
+    "regulates": "regulates_river",
+    "diverts_from": "diverts_flood_from",
+    "activates": "activates_plan",
+    "manages": "manages_response",
+    "commands": "commands",
+    "has_value": "IGNORE",
+    "occurs_at": "IGNORE",
+    "has_impact": "causes_impact",
+    "affected_by": "IGNORE",
+    "has_disaster_types": "IGNORE"
+  },
+  "inverse_relations": {
+    "affected_by": {
+      "standard": "affects_region",
+      "swap_direction": true
+    },
+    "located_at": {
+      "standard": "located_in",
+      "swap_direction": false
+    }
+  },
+  "ignore_relations": [
+    "has_value",
+    "occurs_at",
+    "has_attribute",
+    "has_measure",
+    "construction_started",
+    "completed_at",
+    "operation_time"
+  ]
+}

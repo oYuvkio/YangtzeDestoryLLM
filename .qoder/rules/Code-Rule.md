@@ -43,6 +43,16 @@ trigger: manual
 4. 编写可测试的代码
 5. 使用有意义的变量和函数名
 
+### 代码复用原则（重要）
+1. **优先复用/改进已有代码**：在新增功能时，首先检查是否存在可复用或可扩展的现有代码
+2. **避免创建重复脚本**：不要创建功能相似的新脚本，而是在已有脚本上添加参数支持
+3. **扩展而非重写**：当需要新功能时，优先通过添加参数、配置项或条件分支来扩展现有代码
+4. **合并重复代码**：发现功能相似的多个文件时，应合并为一个并删除冗余文件
+5. **检查清单**：
+   - 新增功能前，先搜索是否有类似功能的现有实现
+   - 新增脚本前，先检查 `scripts/` 目录下是否有可扩展的脚本
+   - 新增工具函数前，先检查 `tools/` 和 `kg/` 目录下是否有可复用的函数
+
 ### 代码版本管理
 1. **版本控制工具**
    - 使用 Git 进行版本控制
@@ -205,7 +215,12 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump(output, f, indent=4, ensure_ascii=False)
 ```
 
-#### 2.3 JSONL 规范
+#### 2.3 批处理稳定性（断点与流式写出）
+1. **长批任务必须流式写文件**：逐条写入 JSONL，并在每条写入后 `flush()`，避免中断丢结果。
+2. **日志必须覆盖进度**：至少输出当前条目索引与总数，必要时记录关键统计（如过滤率）。
+3. **断点续跑需可复用输出**：支持 `--skip-existing` 或基于 `doc_id` 跳过已完成样本。
+
+#### 2.4 JSONL 规范
 - 每行必须是完整的 JSON 对象
 - 不要在行尾添加逗号
 - 适用于大规模批处理结果（P4 suggestions、P5 batch results）
@@ -533,9 +548,114 @@ if Path(path).stat().st_size > MAX_FILE_SIZE:
     raise ValueError(f"文件过大: {path}")
 ```
 
-### 11. 常见错误和调试技巧
+### 11. 数据处理与评测流程规范（重要）
 
-#### 11.1 LLM 调用失败
+#### 11.1 数据源一致性检查
+
+**教训**：在评测实验中，Pred 和 Gold 使用了不同的文本源（截断 vs 完整），导致指标严重偏低。
+
+**规范**：
+1. **始终验证数据完整性**：处理前检查关键字段是否截断或缺失
+2. **建立数据映射机制**：当存在多个数据文件时，添加 `--text-source` 类参数支持数据映射
+3. **文档化数据流**：记录每个处理阶段的输入/输出文件及其字段含义
+
+```python
+# ✅ 正确做法：添加数据源映射支持
+parser.add_argument("--text-source", type=str, default=None,
+                    help="完整文本来源文件，用 id 映射获取完整数据")
+
+# 处理时优先使用完整数据
+if text_lookup and doc_id in text_lookup:
+    text = text_lookup[doc_id]  # 优先使用映射的完整文本
+else:
+    text = sample.get("source_text", "")  # 备选方案
+```
+
+#### 11.2 评测数据对齐原则
+
+**教训**：Gold 使用独立 Schema，Pred 使用项目 TBox，导致关系类型完全不匹配，Triple F1 极低（~4%）。
+
+**规范**：
+1. **Schema 配对使用**：Gold 和 Pred 必须使用相同的 TBox 版本
+2. **版本命名清晰**：文件名中包含版本标识（如 `gold_s2.jsonl` 对应 `tbox_s2_optimized.json`）
+3. **配对检查清单**：
+
+| 配对项 | 必须一致 | 检查方法 |
+|--------|---------|----------|
+| TBox 版本 | Gold 和 Pred 使用相同 TBox | 对比 `--tbox` 参数 |
+| 文本来源 | 都使用完整文本或都使用截断文本 | 对比 `--text-source` 参数 |
+| doc_id 集合 | Gold 覆盖 Pred 的所有 doc_id | 脚本检查交集 |
+
+```bash
+# ✅ 正确的评测命令（确保配对）
+python tools/abox_metrics.py \
+    --gold data/p5_eval_pool/gold_s2_tbox.jsonl \    # S2 版本 Gold
+    --pred outputs/predictions_s2.jsonl \            # S2 版本 Pred
+    --tbox outputs/cq_pipeline/final/tbox_s2_optimized.json  # S2 TBox
+```
+
+#### 11.3 数据截断风险识别
+
+**场景识别**：以下情况可能存在数据截断：
+- `source_text` 字段长度明显短于 `text` 字段
+- 字段值末尾带有 `...` 或 `[truncated]` 标记
+- 文件名包含 `final`、`filtered`、`processed` 等加工标识
+
+**验证脚本示例**：
+```python
+# 检查文本截断
+import json
+from pathlib import Path
+
+def check_truncation(processed_file, source_file):
+    """检查处理后文件是否存在截断"""
+    source_lookup = {}
+    with open(source_file) as f:
+        for line in f:
+            d = json.loads(line)
+            source_lookup[d.get("id", d.get("doc_id"))] = len(d.get("text", ""))
+
+    truncated = 0
+    with open(processed_file) as f:
+        for line in f:
+            d = json.loads(line)
+            doc_id = d.get("doc_id", d.get("id"))
+            processed_len = len(d.get("source_text", d.get("text", "")))
+            source_len = source_lookup.get(doc_id, 0)
+            if processed_len < source_len * 0.8:  # 80% 阈值
+                truncated += 1
+                print(f"⚠️ {doc_id}: {processed_len} vs {source_len} chars")
+
+    print(f"共 {truncated} 条可能被截断")
+```
+
+#### 11.4 评测脚本参数设计规范
+
+为避免数据不一致问题，评测相关脚本应遵循以下参数设计：
+
+```python
+# 标准参数集
+parser.add_argument("--input", required=True, help="输入文件（doc_id 列表来源）")
+parser.add_argument("--text-source", help="完整文本来源文件（可选，优先于 input 中的文本）")
+parser.add_argument("--tbox", required=True, help="TBox 约束文件（明确版本）")
+parser.add_argument("--output", required=True, help="输出文件（文件名应包含版本标识）")
+```
+
+#### 11.5 踩坑检查清单
+
+评测实验前，完成以下检查：
+
+- [ ] **文本完整性**：确认使用完整文本而非截断文本
+- [ ] **Schema 一致性**：确认 Gold 和 Pred 使用相同 TBox 版本
+- [ ] **字段映射正确**：确认 doc_id 映射关系正确（`test.doc_id` → `source.id`）
+- [ ] **版本标识清晰**：文件名包含版本信息（s2/s3）
+- [ ] **路径更新**：使用最新的优化版文件路径（如 `tbox_s2_optimized.json`）
+
+---
+
+### 12. 常见错误和调试技巧
+
+#### 12.1 LLM 调用失败
 **症状**：429 限流、连接超时、JSON 解析失败
 
 **排查步骤**：
@@ -549,7 +669,7 @@ if Path(path).stat().st_size > MAX_FILE_SIZE:
 grep ERROR logs/kg_tbox/*.log | tail -20
 ```
 
-#### 11.2 JSON 解析失败
+#### 12.2 JSON 解析失败
 **症状**：`json.JSONDecodeError`
 
 **排查步骤**：
@@ -564,7 +684,7 @@ with open("debug_response.txt", "w") as f:
     f.write(raw_response)
 ```
 
-#### 11.3 断点续跑不生效
+#### 12.3 断点续跑不生效
 **症状**：重复处理已完成的文档
 
 **排查步骤**：
@@ -579,7 +699,7 @@ logger.info(f"待处理数量: {len(to_process)}")
 logger.debug(f"已处理 ID 样例: {list(processed_ids)[:5]}")
 ```
 
-#### 11.4 内存溢出
+#### 12.4 内存溢出
 **症状**：`MemoryError` 或进程被 killed
 
 **排查步骤**：
