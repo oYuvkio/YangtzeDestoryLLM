@@ -3,7 +3,7 @@
 UIE 基线抽取：基于 TBox 关系构造 schema，输出 P5 风格 events/triples。
 
 说明：
-- 使用 xusenlin/uie-base（transformers + trust_remote_code）。
+- 使用 PaddleNLP PP-UIE 模型（paddlenlp.Taskflow）。
 - 按 doc_id 流式写入 JSONL，避免中断丢结果。
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from transformers import AutoModel, AutoTokenizer
+from paddlenlp import Taskflow
 try:
     from dotenv import load_dotenv
 except Exception:
@@ -222,15 +222,18 @@ def parse_uie_output(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="UIE Baseline 抽取（基于 TBox schema）")
-    parser.add_argument("--model-name", default="xusenlin/uie-base", help="UIE 模型名称或本地路径")
+    parser.add_argument("--model-name", default="paddlenlp/PP-UIE-0.5B", help="PP-UIE 模型名称 (paddlenlp/PP-UIE-0.5B, 1.5B, 7B, 14B)")
     parser.add_argument("--tbox", required=True, help="TBox 路径（json）")
     parser.add_argument("--test-file", required=True, help="测试集文件（jsonl）")
     parser.add_argument("--output", "-o", required=True, help="输出预测文件（jsonl）")
     parser.add_argument("--limit", type=int, default=None, help="最多处理样本数")
     parser.add_argument("--skip-existing", action="store_true", help="跳过已存在的 doc_id")
-    parser.add_argument("--device", default="cpu", help="推理设备（cpu/cuda）")
+    parser.add_argument("--precision", default="float16", help="模型精度 (float16/bfloat16/float32)")
+    parser.add_argument("--batch-size", type=int, default=1, help="批处理大小")
     parser.add_argument("--interval", type=float, default=0.0, help="请求间隔秒数")
     parser.add_argument("--log-file", default="", help="日志文件（可选）")
+    parser.add_argument("--text-source", type=str, default=None,
+        help="完整文本来源文件（可选，通过 doc_id/id 映射获取完整文本）")
     return parser.parse_args()
 
 
@@ -239,10 +242,6 @@ def main() -> None:
         load_dotenv()
     args = parse_args()
     logger = setup_logger(args.log_file or None)
-
-    hf_endpoint = os.getenv("HF_ENDPOINT", "")
-    if hf_endpoint:
-        logger.info(f"HF_ENDPOINT: {hf_endpoint}")
 
     tbox_path = Path(args.tbox)
     test_path = Path(args.test_file)
@@ -260,24 +259,41 @@ def main() -> None:
 
     logger.info(f"UIE Schema: subject={event_label}, relations={len(relation_labels)}")
     logger.info(f"事件回退类型: {fallback_type}")
+    logger.info(f"模型: {args.model_name}, 精度: {args.precision}, 批大小: {args.batch_size}")
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
-    model = AutoModel.from_pretrained(args.model_name, trust_remote_code=True)
-    if hasattr(model, "to"):
-        model.to(args.device)
-
-    use_schema_arg = True
-    try:
-        if hasattr(model, "set_schema"):
-            model.set_schema(schema)
-            use_schema_arg = False
-    except Exception:
-        use_schema_arg = True
+    ie = Taskflow(
+        'information_extraction',
+        schema=schema,
+        schema_lang="zh",
+        batch_size=args.batch_size,
+        model=args.model_name,
+        precision=args.precision
+    )
 
     samples = load_test_samples(test_path)
     if args.limit:
         samples = samples[:args.limit]
     logger.info(f"样本数: {len(samples)}")
+
+    # 加载完整文本映射（如果指定了 --text-source）
+    text_lookup: Dict[str, str] = {}
+    if args.text_source:
+        text_source_path = Path(args.text_source)
+        if text_source_path.exists():
+            logger.info(f"加载完整文本来源: {args.text_source}")
+            with open(text_source_path, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            d = json.loads(line)
+                            tid = d.get("id", d.get("doc_id", ""))
+                            if tid:
+                                text_lookup[tid] = d.get("text", "")
+                        except json.JSONDecodeError:
+                            continue
+            logger.info(f"已加载 {len(text_lookup)} 条完整文本")
+        else:
+            logger.warning(f"文本来源文件不存在: {args.text_source}，将使用输入文件中的文本")
 
     existing_predictions: Dict[str, Dict[str, Any]] = {}
     if args.skip_existing and output_path.exists():
@@ -300,7 +316,8 @@ def main() -> None:
     with output_path.open(write_mode, encoding="utf-8") as out_f:
         for idx, sample in enumerate(samples, start=1):
             doc_id = sample.get("doc_id", f"sample_{idx}")
-            source_text = sample.get("source_text", "")
+            # 优先使用完整文本映射，其次使用输入文件中的文本
+            source_text = text_lookup.get(doc_id) or sample.get("source_text", "")
             if doc_id in existing_predictions:
                 logger.info(f"[{idx}/{len(samples)}] {doc_id}: 跳过已存在")
                 continue
@@ -311,13 +328,14 @@ def main() -> None:
                 continue
 
             try:
-                if use_schema_arg:
-                    result = model.predict(tokenizer, source_text, schema=schema)
-                else:
-                    result = model.predict(tokenizer, source_text)
-            except TypeError:
-                model.set_schema(schema)
-                result = model.predict(tokenizer, source_text)
+                result = ie(source_text)
+                if isinstance(result, list) and len(result) > 0:
+                    result = result[0]
+            except Exception as e:
+                logger.warning(f"[{idx}/{len(samples)}] {doc_id}: 推理失败 - {e}")
+                out_f.write(json.dumps({"doc_id": doc_id, "events": [], "triples": [], "error": str(e)}, ensure_ascii=False) + "\n")
+                out_f.flush()
+                continue
 
             events, triples = parse_uie_output(
                 result,

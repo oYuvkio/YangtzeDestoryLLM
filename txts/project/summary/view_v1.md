@@ -488,6 +488,8 @@ pool_v3.text: 816 字符（完整）
 | `scripts/p5/run_extraction_on_test.py` | Pred 抽取 | `--text-source` |
 | `scripts/p5/run_gold_annotation.sh` | Gold 生成封装 | `--text-source` |
 | `scripts/p5/run_single_model.sh` | 单模型评测 | `--text-source` |
+| `scripts/p5/baseline/uie/run_uie_baseline.py` | UIE Baseline 抽取 | `--text-source` |
+| `scripts/p5/baseline/uie/run_uie_baseline.sh` | UIE 评测封装 | `--text-source` |
 
 **正确用法**：
 ```bash

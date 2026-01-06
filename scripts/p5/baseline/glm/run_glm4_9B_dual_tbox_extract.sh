@@ -41,7 +41,7 @@ python scripts/p5/run_extraction_on_test.py \
     --model "$MODEL" \
     --output "$OUT_DIR_S3/predictions.jsonl" \
     --temperature $TEMPERATURE \
-    --interval 3 \
+    --interval 5 \
     --base-url "$BASE_URL" \
     --text-source "$TEXT_SOURCE" \
     --retry-errors
@@ -61,7 +61,7 @@ python scripts/p5/run_extraction_on_test.py \
     --model "$MODEL" \
     --output "$OUT_DIR_S2/predictions.jsonl" \
     --temperature $TEMPERATURE \
-    --interval 3 \
+    --interval 10 \
     --base-url "$BASE_URL" \
     --text-source "$TEXT_SOURCE" \
     --retry-errors
