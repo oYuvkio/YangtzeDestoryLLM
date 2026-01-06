@@ -52,7 +52,7 @@ export NO_PROXY="localhost,127.0.0.1,::1"
 # ==============================================================================
 DEFAULT_MODEL="gpt-4o"
 DEFAULT_TEMPERATURE="0.1"
-DEFAULT_INTERVAL="1.0"
+DEFAULT_INTERVAL="2.0"
 DEFAULT_MAX_RETRIES="3"
 DEFAULT_INPUT="data/p5_eval_pool/final/test_final.jsonl"
 DEFAULT_BASE_URL="https://api.openai.com/v1"
@@ -68,6 +68,7 @@ INPUT_FILE="$DEFAULT_INPUT"
 OUTPUT_FILE=""
 CONFIG_FILE=""
 RESUME=""
+RETRY_ERRORS=""
 LIMIT=""
 TOP_P=""
 TBOX_VERSION=""  # 空表示独立 Schema 模式，s2/s3 表示 TBox 约束模式
@@ -77,7 +78,7 @@ TEXT_SOURCE=""  # 完整文本来源文件
 # CoT 和幻觉过滤配置（默认开启）
 USE_COT="1"
 USE_VERIFICATION="1"
-VERIFICATION_THRESHOLD="0.7"
+VERIFICATION_THRESHOLD="0.85"
 STRICT_MODE=""
 
 # ==============================================================================
@@ -190,6 +191,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --resume)
             RESUME="--resume"
+            shift
+            ;;
+        --retry-errors)
+            RETRY_ERRORS="--retry-errors"
             shift
             ;;
         --limit)
@@ -388,6 +393,7 @@ if [[ "$MODE" == "tbox" ]]; then
 
     [[ -n "$TOP_P" ]] && CMD="$CMD --top-p $TOP_P"
     [[ -n "$RESUME" ]] && CMD="$CMD $RESUME"
+    [[ -n "$RETRY_ERRORS" ]] && CMD="$CMD $RETRY_ERRORS"
     [[ -n "$LIMIT" ]] && CMD="$CMD --limit $LIMIT"
     [[ -n "$TEXT_SOURCE" ]] && CMD="$CMD --text-source \"$TEXT_SOURCE\""
 else

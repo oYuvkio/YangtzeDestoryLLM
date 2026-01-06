@@ -53,7 +53,7 @@ def configure_logger(
     """
     配置 llm_core 模块的日志。
     
-    如果调用方已经配置了根 logger，设置 propagate=True 就可以自动继承。
+    如果调用方已经配置了根 logger,设置 propagate=True 就可以自动继承。
     如果需要独立输出到文件，可以指定 log_file。
     
     Args:
@@ -898,24 +898,24 @@ class LLMClient:
                         time.sleep(wait)
                         continue
                 
-                # ===== 5xx 服务不可用：短暂等待 =====
+                # ===== 5xx 服务不可用：等待 60s 后重试 =====
                 if any(code in err_lower for code in ["500", "502", "503", "504"]):
                     if attempt < self.max_retries - 1:
                         logger.warning(
-                            f"⏳ API 服务不可用 (5xx)，等待 1s 后重试 "
+                            f"⏳ API 服务不可用 (5xx)，等待 60s 后重试 "
                             f"({attempt + 1}/{self.max_retries}): {err_msg[:100]}"
                         )
-                        time.sleep(1)
+                        time.sleep(60)
                         continue
                     logger.error(f"❌ API 服务持续不可用: {err_msg}")
                     raise ServiceUnavailableError(str(e))
-                
-                # ===== 其他错误：记录并重试 =====
+
+                # ===== 其他错误：等待 60s 后重试 =====
                 if attempt < self.max_retries - 1:
                     logger.warning(
-                        f"⚠️ LLM 调用失败，重试中 ({attempt + 1}/{self.max_retries}): {err_msg[:200]}"
+                        f"⚠️ LLM 调用失败，等待 60s 后重试 ({attempt + 1}/{self.max_retries}): {err_msg[:200]}"
                     )
-                    time.sleep(1)
+                    time.sleep(60)
                 else:
                     logger.error(f"❌ LLM 调用失败（已重试 {self.max_retries} 次）: {err_msg[:500]}")
         

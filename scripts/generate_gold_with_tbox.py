@@ -33,7 +33,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import random
 import re
 import sys
 import time
@@ -365,19 +364,6 @@ def create_llm_client(args: argparse.Namespace):
 # 核心生成函数
 # ==============================================================================
 
-def is_retryable_error(error: Exception) -> bool:
-    """判断是否是可重试的错误"""
-    error_str = str(error).lower()
-    retryable_keywords = [
-        "429", "rate limit", "too many requests",
-        "timeout", "timed out",
-        "connection", "network",
-        "server error", "500", "502", "503", "504",
-        "content_filter", "content filter",  # 内容过滤（政策相关）
-        "safety", "blocked",
-    ]
-    return any(kw in error_str for kw in retryable_keywords)
-
 
 def generate_gold_for_sample(
     text: str,
@@ -388,10 +374,15 @@ def generate_gold_for_sample(
     use_verification: bool = True,
     verification_threshold: float = 0.85,
     strict_mode: bool = True,
-    max_retries: int = 3,
 ) -> Dict[str, Any]:
     """
-    为单个样本生成 Gold 标注
+    为单个样本生成 Gold 标注（单次请求，不重试）
+
+    设计说明：
+    - 对于 RPM 限制严格的 API（如 RPM=3），函数内部不重试
+    - 遇到任何错误直接返回带 error 字段的结果
+    - 由调用方通过 --interval 控制请求间隔
+    - 失败的记录可以后续用 --retry-errors 重试
 
     Args:
         text: 待标注文本
@@ -402,7 +393,6 @@ def generate_gold_for_sample(
         use_verification: 是否使用幻觉过滤
         verification_threshold: 模糊匹配阈值（Gold 推荐 0.85，更严格）
         strict_mode: 是否使用严格模式（Gold 推荐 True，零噪声）
-        max_retries: 最大重试次数
 
     Returns:
         包含 entities, triples, events 的字典
@@ -415,56 +405,40 @@ def generate_gold_for_sample(
         system_prompt = SYSTEM_PROMPT
         user_prompt = USER_PROMPT_TEMPLATE.format(tbox_schema=tbox_schema, text=text)
 
-    last_error = None
     raw_response = ""
 
-    for attempt in range(max_retries):
-        try:
-            # 调用 LLM
-            raw_response = llm.chat(user_prompt, system_prompt=system_prompt)
+    try:
+        # 调用 LLM（单次请求，不重试）
+        raw_response = llm.chat(user_prompt, system_prompt=system_prompt)
 
-            # 解析响应
-            if use_cot:
-                # 使用 kg/prompts.py 中的解析函数
-                result = parse_cot_response(raw_response)
-                if result is None:
-                    result = {"entities": [], "triples": [], "events": [], "parse_error": True}
-                else:
-                    result["parse_error"] = False
-
-                # 提取思考过程
-                thought = extract_cot_thought(raw_response)
-                result["_thinking"] = thought
+        # 解析响应
+        if use_cot:
+            # 使用 kg/prompts.py 中的解析函数
+            result = parse_cot_response(raw_response)
+            if result is None:
+                result = {"entities": [], "triples": [], "events": [], "parse_error": True}
             else:
-                result = extract_json(raw_response)
+                result["parse_error"] = False
 
-            # 解析成功，跳出重试循环
-            if not result.get("parse_error"):
-                break
+            # 提取思考过程
+            thought = extract_cot_thought(raw_response)
+            result["_thinking"] = thought
+        else:
+            result = extract_json(raw_response)
 
-            # 解析失败，重试
-            if attempt < max_retries - 1:
-                time.sleep(1)
-                continue
-
-        except Exception as e:
-            last_error = e
-            if is_retryable_error(e) and attempt < max_retries - 1:
-                delay = 2 ** attempt + random.uniform(0, 1)
-                print(f"\n    ⚠️ 重试 {attempt + 1}/{max_retries}（等待 {delay:.1f}s）: {str(e)[:50]}")
-                time.sleep(delay)
-                continue
-            else:
-                return {
-                    "entities": [],
-                    "triples": [],
-                    "events": [],
-                    "error": str(last_error),
-                    "raw_response": raw_response[:500] if raw_response else "",
-                }
+    except Exception as e:
+        # 任何错误都直接返回，不重试
+        # 由调用方通过 --interval 控制请求间隔，后续用 --retry-errors 重试
+        return {
+            "entities": [],
+            "triples": [],
+            "events": [],
+            "error": str(e),
+            "raw_response": raw_response[:500] if raw_response else "",
+        }
 
     # 确保 result 存在
-    if "result" not in dir() or result is None:
+    if result is None:
         result = {"entities": [], "triples": [], "events": [], "parse_error": True}
 
     # 后校验（幻觉过滤）
@@ -608,6 +582,8 @@ def main() -> None:
 
     # 运行控制
     parser.add_argument("--resume", action="store_true", help="断点续跑")
+    parser.add_argument("--retry-errors", action="store_true",
+                        help="重新跑 error 记录（跳过成功记录，重试失败记录）")
     parser.add_argument("--limit", type=int, default=0, help="限制样本数（0=不限制）")
     parser.add_argument("--interval", type=float, default=0.5, help="请求间隔（秒）")
     parser.add_argument("--max-retries", type=int, default=3, help="最大重试次数")
@@ -682,19 +658,38 @@ def main() -> None:
         else:
             print(f"⚠️  文本来源文件不存在: {args.text_source}，将使用输入文件中的文本")
 
-    # 断点续跑
+    # 断点续跑 / 重试错误
     processed_ids = set()
-    if args.resume and output_path.exists():
+    error_ids = set()  # 需要重试的 error 记录
+    existing_results = {}  # 保存已有结果，用于 retry-errors 模式
+
+    if (args.resume or args.retry_errors) and output_path.exists():
         with open(output_path, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
                     item = json.loads(line)
-                    processed_ids.add(item.get("doc_id", ""))
-        print(f"📌 已处理: {len(processed_ids)}")
+                    doc_id = item.get("doc_id", "")
+                    if item.get("error") or item.get("parse_error"):
+                        error_ids.add(doc_id)
+                    else:
+                        processed_ids.add(doc_id)
+                    existing_results[doc_id] = item
+
+        if args.retry_errors:
+            print(f"📌 已处理成功: {len(processed_ids)}，需重试: {len(error_ids)}")
+        else:
+            # resume 模式：跳过所有已处理的（包括 error）
+            processed_ids.update(error_ids)
+            print(f"📌 已处理: {len(processed_ids)}")
 
     # 处理
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    mode = "a" if args.resume else "w"
+
+    # retry-errors 模式：需要重写整个文件（保留成功的，重试失败的）
+    if args.retry_errors:
+        mode = "w"
+    else:
+        mode = "a" if args.resume else "w"
 
     success = 0
     errors = 0
@@ -706,10 +701,21 @@ def main() -> None:
     print("-" * 70)
 
     with open(output_path, mode, encoding="utf-8") as f_out:
+        # retry-errors 模式：先写入所有成功的记录
+        if args.retry_errors:
+            for doc_id in processed_ids:
+                if doc_id in existing_results:
+                    f_out.write(json.dumps(existing_results[doc_id], ensure_ascii=False) + "\n")
+
         for idx, sample in enumerate(samples):
             doc_id = sample.get("doc_id", sample.get("id", f"doc_{idx}"))
 
+            # 跳过已成功处理的
             if doc_id in processed_ids:
+                continue
+
+            # retry-errors 模式：只处理 error_ids 中的记录
+            if args.retry_errors and doc_id not in error_ids:
                 continue
 
             # 获取文本（优先从 text_lookup 获取完整文本）
@@ -722,7 +728,7 @@ def main() -> None:
 
             print(f"  [{idx+1}/{len(samples)}] {doc_id[:30]}...", end="", flush=True)
 
-            # 生成标注
+            # 生成标注（单次请求，不重试；遇到错误记录后等待 interval 处理下一条）
             result = generate_gold_for_sample(
                 text=text,
                 tbox_schema=tbox_schema,
@@ -732,12 +738,15 @@ def main() -> None:
                 use_verification=use_verification,
                 verification_threshold=args.verification_threshold,
                 strict_mode=args.strict_mode,
-                max_retries=args.max_retries,
             )
 
             # 添加元信息
             result["doc_id"] = doc_id
             result["source_text"] = text[:500] + "..." if len(text) > 500 else text
+
+            # 如果有 parse_error，统一添加 error 字段以支持 --retry-errors
+            if result.get("parse_error") and not result.get("error"):
+                result["error"] = "JSON解析失败"
 
             f_out.write(json.dumps(result, ensure_ascii=False) + "\n")
             f_out.flush()
