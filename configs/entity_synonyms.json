@@ -1,0 +1,210 @@
+{
+  "_description": "实体同义词库：用于评估时的实体归一化匹配",
+  "_usage": "在评估时，如果实体A在同义词列表中，则可以匹配到规范名",
+  "_pipeline_order": "本配置在关系映射之后、方向归一化之前使用",
+
+  "human_factors": {
+    "canonical": "人类活动",
+    "synonyms": ["人为因素", "人类因素", "人为活动", "人为干扰", "人类干预", "人为原因"]
+  },
+
+  "climate_change": {
+    "canonical": "气候变化",
+    "synonyms": ["气候异常", "气候波动", "气候变迁", "气候变异"]
+  },
+
+  "yangtze_delta": {
+    "canonical": "长江三角洲",
+    "synonyms": ["长江三角洲地区", "长三角", "长三角地区"]
+  },
+
+  "yangtze_basin": {
+    "canonical": "长江流域",
+    "synonyms": ["长江水系", "长江干流流域"]
+  },
+
+  "middle_lower_yangtze": {
+    "canonical": "长江中下游",
+    "synonyms": ["长江中下游地区", "长江中下游流域", "中下游地区", "中下游"]
+  },
+
+  "flood": {
+    "canonical": "洪水",
+    "synonyms": ["洪涝", "洪灾", "大水", "水灾", "涝灾", "洪患", "洪涝灾害", "洪水灾害"]
+  },
+
+  "drought": {
+    "canonical": "干旱",
+    "synonyms": ["旱灾", "旱情", "大旱", "奇旱", "伏旱", "春旱", "秋旱", "冬旱", "干旱灾害", "冬干"]
+  },
+
+  "heavy_rain": {
+    "canonical": "暴雨",
+    "synonyms": ["强降雨", "大暴雨", "特大暴雨", "强降水", "暴雨洪水", "强降雨过程"]
+  },
+
+  "el_nino": {
+    "canonical": "厄尔尼诺",
+    "synonyms": ["El Nino", "El Niño", "厄尔尼诺现象", "ENSO", "厄尔尼诺事件"]
+  },
+
+  "warm_humid_climate": {
+    "canonical": "暖湿气候",
+    "synonyms": ["暖湿的气候", "温暖湿润气候", "暖湿期"]
+  },
+
+  "dongting_lake": {
+    "canonical": "洞庭湖",
+    "synonyms": ["洞庭湖区", "洞庭湖流域", "洞庭湖水系", "洞庭湖地区"]
+  },
+
+  "poyang_lake": {
+    "canonical": "鄱阳湖",
+    "synonyms": ["鄱阳湖区", "鄱阳湖流域", "鄱阳湖水系", "鄱阳湖地区"]
+  },
+
+  "three_gorges": {
+    "canonical": "三峡",
+    "synonyms": ["长江三峡", "三峡地区", "三峡库区", "三峡水库", "三峡大坝", "三峡工程"]
+  },
+
+  "disaster_impact": {
+    "canonical": "灾害损失",
+    "synonyms": ["灾害影响", "灾情", "受灾", "损失", "灾损"]
+  },
+
+  "emergency_response": {
+    "canonical": "应急响应",
+    "synonyms": ["应急预案", "应急处置", "抗灾响应", "防汛响应", "抗旱响应"]
+  },
+
+  "_comment_secondary_disaster": "次生灾害相关实体",
+  "secondary_disaster": {
+    "canonical": "次生灾害",
+    "synonyms": ["山洪", "泥石流", "滑坡", "崩塌", "山体滑坡", "地质灾害"]
+  },
+
+  "_comment_urban_waterlogging": "城市内涝相关实体",
+  "urban_waterlogging": {
+    "canonical": "城市内涝",
+    "synonyms": ["内涝", "城市积水", "城区积水", "市区内涝", "城市洪涝"]
+  },
+
+  "_comment_taihu": "太湖相关实体",
+  "taihu_lake": {
+    "canonical": "太湖",
+    "synonyms": ["太湖流域", "太湖水系", "太湖地区"]
+  },
+
+  "_comment_hanjiang": "汉江相关实体",
+  "hanjiang_river": {
+    "canonical": "汉江",
+    "synonyms": ["汉江流域", "汉江水系", "汉水"]
+  },
+
+  "_comment_jialing": "嘉陵江相关实体",
+  "jialing_river": {
+    "canonical": "嘉陵江",
+    "synonyms": ["嘉陵江流域", "嘉陵江水系"]
+  },
+
+  "_comment_station_suffix": "水文站后缀归一化",
+  "hydrological_station": {
+    "canonical": "水文站",
+    "synonyms": ["站", "测站"]
+  },
+
+  "_comment_flood_control": "防洪工程相关",
+  "flood_control_project": {
+    "canonical": "防洪工程",
+    "synonyms": ["防洪设施", "防洪体系", "防洪系统"]
+  },
+
+  "_comment_reservoir_general": "水库通用词",
+  "reservoir": {
+    "canonical": "水库",
+    "synonyms": ["蓄水库", "水利枢纽"]
+  },
+
+  "_comment_from_alignment_examples": "来自诊断报告的实体对齐示例 - 高频模糊匹配",
+
+  "water_bureau": {
+    "canonical": "水文局",
+    "synonyms": ["省水文局", "市水文局", "县水文局"]
+  },
+
+  "water_infrastructure_weak": {
+    "canonical": "水利设施薄弱",
+    "synonyms": ["水利基础设施薄弱", "水利基础设施不完善", "水利设施老化"]
+  },
+
+  "jianghan_plain": {
+    "canonical": "江汉平原",
+    "synonyms": ["江汉平原区", "江汉地区"]
+  },
+
+  "south_water_north": {
+    "canonical": "南水北调",
+    "synonyms": ["南水北调工程", "南水北调中线工程", "南水北调中线一期工程", "南水北调东线工程"]
+  },
+
+  "warm_humid_airflow": {
+    "canonical": "西南暖湿气流",
+    "synonyms": ["强盛西南暖湿气流", "暖湿气流", "西南气流"]
+  },
+
+  "chongqing_wushan": {
+    "canonical": "重庆市巫山县",
+    "synonyms": ["重庆市巫山县城", "巫山县", "巫山"]
+  },
+
+  "_comment_geographic_regions": "地理区域补充",
+
+  "anhui_south": {
+    "canonical": "安徽南部",
+    "synonyms": ["皖南", "安徽西南部", "安徽东南部"]
+  },
+
+  "sichuan_east": {
+    "canonical": "四川东部",
+    "synonyms": ["川东", "四川东南部", "四川东北部"]
+  },
+
+  "guangdong_north": {
+    "canonical": "广东北部",
+    "synonyms": ["粤北"]
+  },
+
+  "hunan_north": {
+    "canonical": "湖南北部",
+    "synonyms": ["湘北"]
+  },
+
+  "hubei_east": {
+    "canonical": "湖北东部",
+    "synonyms": ["鄂东"]
+  },
+
+  "jiangxi_north": {
+    "canonical": "江西北部",
+    "synonyms": ["赣北"]
+  },
+
+  "_comment_levee_suffix": "堤防后缀归一化",
+  "songzi_levee": {
+    "canonical": "松滋江堤",
+    "synonyms": ["松滋江"]
+  },
+
+  "_comment_chuhe": "滁河相关",
+  "chuhe_river": {
+    "canonical": "滁河",
+    "synonyms": ["滁河流域", "滁河水系"]
+  },
+
+  "_comment_chuhe_station": "滁河站闸",
+  "chuhe_station": {
+    "canonical": "滁河一级站闸",
+    "synonyms": ["调度滁河一级站闸"]
+  }
+}

@@ -205,22 +205,74 @@ python scripts/p5/align_pred_to_gold.py \
     --out "$ALIGNED_FILE" \
     --report "$ALIGN_REPORT"
 
-GOLD_FOR_METRICS="$TEST_FILE"
-PRED_FOR_METRICS="$ALIGNED_FILE"
+echo ""
+echo "[Step 2.1] 过滤 Gold/Pred 中的 error 行..."
+GOLD_FILTERED="$OUT_DIR/gold_filtered.jsonl"
+PRED_FILTERED="$OUT_DIR/predictions_filtered.jsonl"
+python scripts/p5/filter_gold_errors.py \
+    --gold "$TEST_FILE" \
+    --pred "$ALIGNED_FILE" \
+    --gold-out "$GOLD_FILTERED" \
+    --pred-out "$PRED_FILTERED"
+
+# ============================================================================
+# 归一化 Pipeline（顺序重要：关系映射 → 实体归一化 → 方向归一化）
+# ============================================================================
+
+# Step 2.2: 关系映射（先做 - 将非标准关系映射到标准关系）
+GOLD_FOR_NORM="$GOLD_FILTERED"
+PRED_FOR_NORM="$PRED_FILTERED"
 if [ -n "$REL_MAPPING" ]; then
     echo ""
-    echo "[Step 2.5] 关系映射..."
-    MAPPED_PRED="$OUT_DIR/predictions_mapped.jsonl"
-    MAPPED_GOLD="$OUT_DIR/gold_mapped.jsonl"
+    echo "[Step 2.2] 关系映射（中文→英文，同义词→标准词）..."
+    MAPPED_GOLD="$OUT_DIR/gold_relation_mapped.jsonl"
+    MAPPED_PRED="$OUT_DIR/predictions_relation_mapped.jsonl"
     python scripts/p5/apply_relation_mapping.py \
-        --pred "$ALIGNED_FILE" \
-        --gold "$TEST_FILE" \
+        --pred "$PRED_FILTERED" \
+        --gold "$GOLD_FILTERED" \
         --mapping "$REL_MAPPING" \
         --out-pred "$MAPPED_PRED" \
         --out-gold "$MAPPED_GOLD"
-    GOLD_FOR_METRICS="$MAPPED_GOLD"
-    PRED_FOR_METRICS="$MAPPED_PRED"
+    GOLD_FOR_NORM="$MAPPED_GOLD"
+    PRED_FOR_NORM="$MAPPED_PRED"
 fi
+
+# Step 2.3: 实体同义词归一化（第二步）
+echo ""
+echo "[Step 2.3] 实体同义词归一化..."
+SYNONYMS_FILE="configs/entity_synonyms.json"
+GOLD_ENTITY_NORM="$OUT_DIR/gold_entity_normalized.jsonl"
+PRED_ENTITY_NORM="$OUT_DIR/predictions_entity_normalized.jsonl"
+if [ -f "$SYNONYMS_FILE" ]; then
+    python scripts/p5/normalize_entities.py \
+        --gold "$GOLD_FOR_NORM" \
+        --pred "$PRED_FOR_NORM" \
+        --synonyms "$SYNONYMS_FILE" \
+        --gold-out "$GOLD_ENTITY_NORM" \
+        --pred-out "$PRED_ENTITY_NORM"
+    GOLD_FOR_DIRECTION="$GOLD_ENTITY_NORM"
+    PRED_FOR_DIRECTION="$PRED_ENTITY_NORM"
+else
+    echo "  同义词库不存在，跳过实体归一化"
+    GOLD_FOR_DIRECTION="$GOLD_FOR_NORM"
+    PRED_FOR_DIRECTION="$PRED_FOR_NORM"
+fi
+
+# Step 2.4: 三元组方向归一化（最后做 - 基于已归一化的关系和实体判断方向）
+echo ""
+echo "[Step 2.4] 三元组方向归一化..."
+GOLD_NORMALIZED="$OUT_DIR/gold_normalized.jsonl"
+PRED_NORMALIZED="$OUT_DIR/predictions_normalized.jsonl"
+python scripts/p5/normalize_triple_direction.py \
+    --gold "$GOLD_FOR_DIRECTION" \
+    --pred "$PRED_FOR_DIRECTION" \
+    --tbox "$TBOX" \
+    --gold-out "$GOLD_NORMALIZED" \
+    --pred-out "$PRED_NORMALIZED"
+
+# 设置最终用于评测的文件
+GOLD_FOR_METRICS="$GOLD_NORMALIZED"
+PRED_FOR_METRICS="$PRED_NORMALIZED"
 
 echo ""
 echo "[Step 3] 评测（回退）..."
@@ -239,11 +291,51 @@ python tools/abox_metrics.py \
     --use-original-type \
     --out "$METRICS_RAW_FILE"
 
+# Step 3.2: 诊断报告
+echo ""
+echo "[Step 3.2] 生成诊断报告..."
+DIAGNOSIS_FILE="$OUT_DIR/diagnosis_report.json"
+python scripts/p5/diagnose_extraction.py \
+    --gold "$GOLD_FOR_METRICS" \
+    --pred "$PRED_FOR_METRICS" \
+    --tbox "$TBOX" \
+    --output "$DIAGNOSIS_FILE"
+
 echo ""
 echo "============================================================"
-echo "完成"
+echo "评测完成"
 echo "============================================================"
-echo "预测结果: $PRED_FILE"
-echo "对齐结果: $ALIGNED_FILE"
-echo "指标(回退): $METRICS_FILE"
-echo "指标(原始): $METRICS_RAW_FILE"
+
+# 显示评估配置摘要
+echo ""
+echo "【评估配置】"
+if [ -n "$REL_MAPPING" ]; then
+    echo "  关系映射:         ✅ 已启用"
+else
+    echo "  关系映射:         ❌ 未启用"
+fi
+if [ -f "$SYNONYMS_FILE" ]; then
+    echo "  实体同义词归一化: ✅ 已启用"
+else
+    echo "  实体同义词归一化: ❌ 未启用"
+fi
+echo "  三元组方向归一化: ✅ 已启用"
+echo "  TBox类型回退:     ✅ 已启用（同时输出原始类型指标）"
+echo ""
+echo "【归一化文件】"
+if [ -n "$REL_MAPPING" ]; then
+    echo "  关系映射配置: $REL_MAPPING"
+fi
+if [ -f "$SYNONYMS_FILE" ]; then
+    echo "  实体同义词库: $SYNONYMS_FILE"
+fi
+echo "  归一化Gold:   $GOLD_NORMALIZED"
+echo "  归一化Pred:   $PRED_NORMALIZED"
+echo "  诊断报告:     $DIAGNOSIS_FILE"
+
+echo ""
+echo "【输出文件】"
+echo "  预测结果:     $PRED_FILE"
+echo "  对齐结果:     $ALIGNED_FILE"
+echo "  指标(回退):   $METRICS_FILE"
+echo "  指标(原始):   $METRICS_RAW_FILE"

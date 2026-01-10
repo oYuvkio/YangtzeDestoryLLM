@@ -28,6 +28,7 @@ class VerificationResult:
         valid_triples: 通过验证的三元组列表
         filtered_triples: 被过滤的三元组列表（含过滤原因）
         valid_events: 通过验证的事件列表
+        filtered_events: 被过滤的事件列表（含过滤原因）
         total_triples: 待验证的三元组总数
         valid_count: 通过验证的三元组数
         filtered_count: 被过滤的三元组数
@@ -37,11 +38,17 @@ class VerificationResult:
     valid_triples: List[Dict] = field(default_factory=list)
     filtered_triples: List[Dict] = field(default_factory=list)
     valid_events: List[Dict] = field(default_factory=list)
+    filtered_events: List[Dict] = field(default_factory=list)
 
     total_triples: int = 0
     valid_count: int = 0
     filtered_count: int = 0
     hallucination_rate: float = 0.0
+
+    # 事件验证统计
+    total_events: int = 0
+    valid_event_count: int = 0
+    filtered_event_count: int = 0
 
     verification_log: List[str] = field(default_factory=list)
 
@@ -77,7 +84,8 @@ class HallucinationFilter:
         strict_mode: bool = True,
         fuzzy_threshold: float = 0.8,
         min_entity_length: int = 2,
-        verbose: bool = True
+        verbose: bool = True,
+        verify_events: bool = True
     ):
         """
         初始化校验器
@@ -87,11 +95,23 @@ class HallucinationFilter:
             fuzzy_threshold: 模糊匹配相似度阈值（0-1），默认0.8
             min_entity_length: 最小实体长度，过短的实体跳过校验（如单个数字）
             verbose: 是否输出详细日志
+            verify_events: 是否对事件也进行原文校验（默认True）
         """
         self.strict_mode = strict_mode
         self.fuzzy_threshold = fuzzy_threshold
         self.min_entity_length = min_entity_length
         self.verbose = verbose
+        self.verify_events = verify_events
+
+        # 灾害关键词列表，用于事件校验
+        self.disaster_keywords = [
+            "洪水", "洪涝", "洪灾", "大水", "水灾", "涝灾",
+            "旱灾", "干旱", "旱情", "奇旱", "大旱",
+            "决口", "溃堤", "溃坝", "漫堤", "溃决",
+            "暴雨", "强降雨", "特大暴雨",
+            "台风", "风暴潮",
+            "泥石流", "山洪", "滑坡",
+        ]
 
     def verify(
         self,
@@ -118,11 +138,34 @@ class HallucinationFilter:
         full_text = self._merge_text(original_text, context_before, context_after)
         clean_text = self._normalize_text(full_text)
 
-        # 验证事件（宽松处理，主要验证事件名称）
+        # 验证事件
         events = extraction_result.get("events", [])
+        result.total_events = len(events)
+
         for event in events:
-            if isinstance(event, dict):
+            if not isinstance(event, dict):
+                continue
+
+            if self.verify_events:
+                # 对事件进行原文校验
+                is_valid, reason = self._verify_event(event, clean_text, full_text)
+                if is_valid:
+                    result.valid_events.append(event)
+                    result.valid_event_count += 1
+                else:
+                    event_with_reason = {**event, "filter_reason": reason}
+                    result.filtered_events.append(event_with_reason)
+                    result.filtered_event_count += 1
+
+                    if self.verbose:
+                        event_name = event.get("name", "")
+                        log_msg = f"[事件过滤] {event_name} | 原因: {reason}"
+                        result.verification_log.append(log_msg)
+                        logger.debug(log_msg)
+            else:
+                # 不校验事件，直接保留
                 result.valid_events.append(event)
+                result.valid_event_count += 1
 
         # 验证三元组（严格处理）
         triples = extraction_result.get("triples", [])
@@ -225,6 +268,68 @@ class HallucinationFilter:
             return False, f"宾语'{obj}': {o_reason}"
 
         return True, f"验证通过(subject:{s_reason}, object:{o_reason})"
+
+    def _verify_event(
+        self,
+        event: Dict,
+        clean_text: str,
+        original_text: str
+    ) -> Tuple[bool, str]:
+        """
+        验证单个事件是否有原文依据
+
+        验证策略（宽松）：
+        1. 事件名完整匹配
+        2. 事件名核心词匹配（去掉时间、地点后的灾害词）
+        3. 事件名中的灾害关键词在原文中出现
+
+        Args:
+            event: 事件字典，包含 name, event_type 等字段
+            clean_text: 去除空白后的原文
+            original_text: 原始文本
+
+        Returns:
+            Tuple[bool, str]: (是否有效, 原因说明)
+        """
+        event_name = event.get("name", "").strip()
+
+        if not event_name:
+            return False, "事件名为空"
+
+        # 清理事件名中的空白字符
+        clean_event_name = re.sub(r'\s+', '', event_name)
+
+        # 1. 完整名称精确匹配
+        if clean_event_name in clean_text:
+            return True, "事件名精确匹配"
+
+        if event_name in original_text:
+            return True, "事件名原文匹配"
+
+        # 2. 检查事件名中是否包含灾害关键词，且该关键词在原文中出现
+        for keyword in self.disaster_keywords:
+            if keyword in event_name and keyword in clean_text:
+                return True, f"灾害关键词'{keyword}'匹配"
+
+        # 3. 模糊匹配（非严格模式下）
+        if not self.strict_mode:
+            # 尝试模糊匹配事件名
+            similarity = self._fuzzy_search(clean_event_name, clean_text)
+            if similarity >= self.fuzzy_threshold:
+                return True, f"事件名模糊匹配({similarity:.2f})"
+
+            # 尝试匹配事件名的核心部分（去掉年份等）
+            # 例如 "1998年长江特大洪水" -> "长江特大洪水"
+            core_name = re.sub(r'^\d{4}年', '', event_name)
+            core_name = re.sub(r'\s+', '', core_name)
+            if core_name and len(core_name) >= 3:
+                if core_name in clean_text:
+                    return True, "事件核心名匹配"
+                similarity = self._fuzzy_search(core_name, clean_text)
+                if similarity >= self.fuzzy_threshold:
+                    return True, f"事件核心名模糊匹配({similarity:.2f})"
+
+        return False, f"事件名'{event_name}'未在原文中找到"
 
     def _check_entity(
         self,

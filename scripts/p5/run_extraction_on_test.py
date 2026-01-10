@@ -107,6 +107,7 @@ def main() -> None:
     parser.add_argument("--model", default=None, help="模型名称（覆盖配置）")
     parser.add_argument("--base-url", default=None, help="API base URL（覆盖配置）")
     parser.add_argument("--temperature", type=float, default=None, help="温度参数")
+    parser.add_argument("--top-p", type=float, default=None, help="Top-P 参数")
     parser.add_argument(
         "--output", "-o",
         default=None,
@@ -154,6 +155,7 @@ def main() -> None:
     model_name = args.model or cfg_llm.get("model_name", "gpt-4o-mini")
     base_url = args.base_url or cfg_llm.get("base_url")
     temperature = args.temperature if args.temperature is not None else cfg_llm.get("temperature", 0.1)
+    top_p = args.top_p if args.top_p is not None else cfg_llm.get("top_p")
 
     # 输出路径
     if args.output:
@@ -211,14 +213,17 @@ def main() -> None:
         "model_name": model_name,
         "temperature": temperature,
     }
+    if top_p is not None:
+        llm_config["top_p"] = top_p
     if base_url:
         llm_config["base_url"] = base_url
 
     logger.info(
-        "LLM 配置: provider=%s, model=%s, temperature=%s, use_cot=%s, use_verify=%s",
+        "LLM 配置: provider=%s, model=%s, temperature=%s, top_p=%s, use_cot=%s, use_verify=%s",
         provider,
         model_name,
         temperature,
+        top_p,
         use_cot,
         use_verify,
     )
@@ -320,7 +325,7 @@ def main() -> None:
                         favor_existing_classes=args.favor_existing,
                         use_cot=use_cot,
                         strict_filter=True,
-                        fuzzy_threshold=0.85,  # 与 Gold 保持一致，确保评测公平
+                        # 使用统一阈值（默认 0.85，与 Gold 保持一致）
                     )
 
                     filtered_triples = res.get("filtered_triples", []) or []

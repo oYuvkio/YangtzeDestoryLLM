@@ -26,6 +26,9 @@ from .prompts import (
     P5_COT_EXTRACTION_PROMPT,
     parse_cot_response,
     extract_cot_thought,
+    UNIFIED_SYSTEM_PROMPT_COT,
+    UNIFIED_USER_PROMPT_COT,
+    UNIFIED_VERIFICATION_THRESHOLD,
 )
 from kg.utils.entity_linking import EntityNormalizer, normalize_entity
 from kg.hallucination_filter import HallucinationFilter, filter_hallucinations, VerificationResult
@@ -120,6 +123,57 @@ class TBoxSchema:
         with file_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         return cls.from_dict(data)
+
+
+# =========================
+# Schema 格式化工具
+# =========================
+def format_schema_for_prompt(schema_json: Dict[str, Any], style: str = "markdown") -> str:
+    """
+    将 TBox Schema 格式化为 Prompt 可用的文本。
+
+    Args:
+        schema_json: TBox JSON 对象
+        style: 格式化风格，"markdown" 或 "json"
+
+    Returns:
+        格式化后的 Schema 文本
+    """
+    if style == "json":
+        return json.dumps(schema_json, ensure_ascii=False, indent=2)
+
+    lines = []
+
+    # 格式化类（中文名在前）
+    lines.append("【实体类型定义】\n")
+    for cls in schema_json.get("classes", []):
+        name = cls.get("name", "")
+        cn_name = cls.get("cn_name", "")
+        definition = cls.get("definition", "")
+        examples = cls.get("examples", [])
+
+        lines.append(f"- **{cn_name}** (ID: `{name}`)")
+        lines.append(f"  - 定义：{definition}")
+        if examples:
+            lines.append(f"  - 示例：{', '.join(examples[:3])}")
+
+    # 格式化关系（表格形式，强调方向）
+    lines.append("\n【关系类型定义】\n")
+    lines.append("| 中文名 | 关系ID | 主语类型(domain) | 宾语类型(range) | 说明 |")
+    lines.append("|--------|--------|------------------|-----------------|------|")
+
+    for rel in schema_json.get("relations", []):
+        name = rel.get("name", "")
+        cn_name = rel.get("cn_name", "")
+        domain = rel.get("domain", "")
+        range_ = rel.get("range", "")
+        definition = rel.get("definition", "")
+        if len(definition) > 30:
+            definition = definition[:30] + "..."
+
+        lines.append(f"| {cn_name} | `{name}` | {domain} | {range_} | {definition} |")
+
+    return "\n".join(lines)
 
 
 # =========================
@@ -596,11 +650,6 @@ class CQLLMPipeline:
 
         allowed_event_types = {c.name for c in schema.classes if c.name}
         allowed_predicates = {r.name for r in schema.relations if r.name}
-        fallback_event_type = (
-            "DisasterEvent"
-            if "DisasterEvent" in allowed_event_types
-            else next(iter(allowed_event_types), "")
-        )
 
         invalid_event_type_count = 0
         cleaned_events: List[Dict[str, Any]] = []
@@ -617,7 +666,7 @@ class CQLLMPipeline:
             ev["original_event_type"] = raw_event_type
             if allowed_event_types and raw_event_type not in allowed_event_types:
                 invalid_event_type_count += 1
-                ev["event_type"] = fallback_event_type or raw_event_type
+                ev["_invalid_event_type"] = True
                 ev["_is_fallback"] = True
             else:
                 ev["_is_fallback"] = False
@@ -670,7 +719,7 @@ class CQLLMPipeline:
             cleaned_triples.append(tr)
 
         if invalid_event_type_count:
-            logger.warning(f"[P5] 发现不在 TBox 中的 event_type: {invalid_event_type_count} 个，已回退为 {fallback_event_type or '原值'}。")
+            logger.warning(f"[P5] 发现不在 TBox 中的 event_type: {invalid_event_type_count} 个，已标记 _invalid_event_type=True。")
         if invalid_predicate_count:
             logger.warning(f"[P5] 发现不在 TBox 中的 predicate: {invalid_predicate_count} 个，已标记 _invalid_predicate=True。")
 
@@ -743,15 +792,16 @@ class CQLLMPipeline:
         favor_existing_classes: bool = True,
         use_cot: bool = True,
         strict_filter: bool = True,
-        fuzzy_threshold: float = 0.8,
+        fuzzy_threshold: float = UNIFIED_VERIFICATION_THRESHOLD,
     ) -> Dict[str, Any]:
         """
         带原文回溯校验的知识抽取（P5 + 幻觉过滤）。
 
         整合 CoT 约束抽取和原文回溯校验，一步完成高质量抽取。
+        使用统一的 Prompt 和阈值，确保与 Gold 标注一致。
 
         流程：
-        1. P5: 使用 CoT Prompt 进行分步抽取（或普通 Prompt）
+        1. P5: 使用统一的 CoT Prompt 进行分步抽取（或普通 Prompt）
         2. 清洗: 对抽取结果进行基础清洗
         3. 幻觉过滤: 原文回溯校验，过滤不在原文中的实体
         4. 标准化: 对保留的结果进行格式标准化
@@ -765,7 +815,7 @@ class CQLLMPipeline:
             favor_existing_classes: 是否优先使用现有类
             use_cot: 是否使用 CoT Prompt（默认 True）
             strict_filter: 是否使用严格过滤模式（仅精确匹配）
-            fuzzy_threshold: 模糊匹配阈值（0-1）
+            fuzzy_threshold: 模糊匹配阈值（默认使用统一阈值 UNIFIED_VERIFICATION_THRESHOLD）
 
         Returns:
             包含抽取结果和验证统计的字典：
@@ -783,27 +833,20 @@ class CQLLMPipeline:
         # 构建输入文本（带上下文标记）
         input_text = self._format_context_input(paragraph, context_before, context_after)
 
-        # 构建 Schema JSON
-        schema_json = json.dumps(schema.to_dict(), ensure_ascii=False, indent=2)
-
-        # 构建类使用提示
-        if favor_existing_classes:
-            class_usage_hint = "优先使用 TBox 中已有的类名，不要随意创造新的事件类型；倾向用已有类 + 属性表达。"
-        else:
-            class_usage_hint = "允许充分使用 TBox 中新增的细粒度类（如新补充的 HazardFactor 子类等），鼓励细分事件类型。"
+        # 构建 TBox Schema 文本（使用 format_schema_for_prompt）
+        tbox_schema = format_schema_for_prompt(schema.to_dict(), style="markdown")
 
         # 选择 Prompt 模板
         thought = ""
         if use_cot:
-            user_prompt = P5_COT_EXTRACTION_PROMPT.format(
-                schema_json=schema_json,
-                event_schema=EVENT_SCHEMA_HINT,
-                input_text=input_text,
-                class_usage_hint=class_usage_hint,
+            # 使用统一的 CoT Prompt（与 Gold 标注一致）
+            user_prompt = UNIFIED_USER_PROMPT_COT.format(
+                tbox_schema=tbox_schema,
+                text=input_text,
             )
             # CoT 模式需要特殊处理响应
             messages = [
-                {"role": "system", "content": "你是水旱灾害知识图谱构建专家，请按照思维链格式输出。"},
+                {"role": "system", "content": UNIFIED_SYSTEM_PROMPT_COT},
                 {"role": "user", "content": user_prompt},
             ]
             raw_response = self.llm.chat_messages(messages, json_mode=False)
@@ -817,6 +860,12 @@ class CQLLMPipeline:
                 logger.warning("[P5+] CoT 响应解析失败，返回空结果")
                 res = {"events": [], "triples": []}
         else:
+            # 非 CoT 模式使用原有的 P5_EXTRACTION_PROMPT
+            schema_json = json.dumps(schema.to_dict(), ensure_ascii=False, indent=2)
+            if favor_existing_classes:
+                class_usage_hint = "优先使用 TBox 中已有的类名，不要随意创造新的事件类型；倾向用已有类 + 属性表达。"
+            else:
+                class_usage_hint = "允许充分使用 TBox 中新增的细粒度类（如新补充的 HazardFactor 子类等），鼓励细分事件类型。"
             user_prompt = P5_EXTRACTION_PROMPT.format(
                 schema_json=schema_json,
                 event_schema=EVENT_SCHEMA_HINT,

@@ -1,7 +1,39 @@
 {
+  "_description": "关系映射配置 - 用于评估时的关系归一化",
+  "_pipeline_order": "1. 关系映射 -> 2. 实体归一化 -> 3. 方向归一化",
+
   "relation_mapping": {
     "has_value": "IGNORE",
     "affects": "affects_region",
+
+    "_comment_chinese": "中文关系名映射到英文",
+    "属于": "belongs_to_basin",
+    "属于流域": "belongs_to_basin",
+    "位于": "located_in",
+    "影响": "affects_region",
+    "监测": "monitors_river",
+    "调控": "regulates_river",
+    "保护": "protects_region",
+    "导致": "causes_impact",
+    "引发": "triggers_response",
+    "流入": "flows_into",
+    "连接": "connects_lake",
+    "包含": "part_of",
+
+    "_comment_pred_variants": "Pred模型输出的关系变体映射",
+    "executed_operation": "executes_operation",
+    "implement_measure": "implements_measure",
+    "has_drought_grade": "has_risk_level",
+    "operates": "regulates_river",
+    "operates_in": "located_in",
+    "operates_with": "regulates_river",
+    "influences": "influenced_by_climate",
+    "issues_warning": "triggers_response",
+    "includes_measure": "implements_measure",
+    "transmitted_to": "affects_region",
+    "used_for": "serves_region",
+    "used_in": "located_in",
+    "is_a": "part_of",
     "part_of": "belongs_to_basin",
     "occurs_at": "located_in",
     "has_cause": "has_hazard_factor",
@@ -49,6 +81,26 @@
   "inverse_relations": {
     "affected_by": {
       "standard": "affects_region",
+      "swap_direction": true
+    },
+    "can_be_defended_by": {
+      "standard": "protects_region",
+      "swap_direction": true
+    },
+    "executed_by": {
+      "standard": "operated_by",
+      "swap_direction": true
+    },
+    "implemented_by": {
+      "standard": "operated_by",
+      "swap_direction": true
+    },
+    "caused_by": {
+      "standard": "causes_impact",
+      "swap_direction": true
+    },
+    "influenced_by": {
+      "standard": "influenced_by_climate",
       "swap_direction": true
     }
   },
@@ -173,5 +225,28 @@
     "conducts_research",
     "research_focus",
     "operation_duration"
-  ]
+  ],
+
+  "event_type_mapping": {
+    "_description": "事件类型映射 - 用于评估时的事件类型归一化",
+    "Flood": "DisasterEvent",
+    "FloodEvent": "DisasterEvent",
+    "Drought": "DroughtEvent",
+    "Waterlogging": "UrbanWaterlogging",
+    "洪水": "DisasterEvent",
+    "洪水事件": "DisasterEvent",
+    "洪涝": "DisasterEvent",
+    "洪灾": "DisasterEvent",
+    "干旱": "DroughtEvent",
+    "旱灾": "DroughtEvent",
+    "旱情": "DroughtEvent",
+    "内涝": "UrbanWaterlogging",
+    "城市内涝": "UrbanWaterlogging",
+    "山洪": "SecondaryDisaster",
+    "泥石流": "SecondaryDisaster",
+    "滑坡": "SecondaryDisaster",
+    "崩塌": "SecondaryDisaster",
+    "枯水": "LowWaterEvent",
+    "低水位": "LowWaterEvent"
+  }
 }

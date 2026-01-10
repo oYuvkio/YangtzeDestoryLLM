@@ -428,6 +428,7 @@ class LLMClient:
 	                - model_name: 模型名称（必需）
 	                - temperature: 温度参数（默认 0.1）
 	                - max_retries: 最大重试次数（默认 3）
+	                - top_p: Top-P 参数（可选）
 	                - timeout: 超时时间秒（默认 60）
 	                - max_tokens: 最大生成 token 数（可选；仅在显式配置时才传给 API）
 	                - request_mode: 请求方式（sdk/post/auto，默认 sdk）
@@ -487,6 +488,7 @@ class LLMClient:
         self.base_url = base_url
         self.temperature = config.get("temperature", 0.1)
         self.max_retries = config.get("max_retries", 3)
+        self.top_p = config.get("top_p")
         self.timeout = config.get("timeout", 60)
         
         # ===== 思考模式配置 =====
@@ -742,6 +744,8 @@ class LLMClient:
                 }
                 if self.max_tokens is not None:
                     params["max_tokens"] = self.max_tokens
+                if self.top_p is not None:
+                    params["top_p"] = self.top_p
                 
                 # 只有支持 response_format 的 API 才添加此参数
                 if use_response_format:

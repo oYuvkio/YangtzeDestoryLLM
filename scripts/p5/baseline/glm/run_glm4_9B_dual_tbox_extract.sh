@@ -13,11 +13,16 @@ export PYTHONPATH=.
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
 export NO_PROXY="localhost,127.0.0.1,::1"
 
+# 日期后缀（用于区分不同批次，如 20260107_1530）
+DATE_SUFFIX=$(date +%Y%m%d_%H%M)
+
 # 配置
 MODEL="THUDM/GLM-4-9B-0414"
+MODEL_DIR_NAME="THUDM_GLM-4-9B-0414"
 BASE_URL="https://api.siliconflow.cn/v1/"
 API_KEY="sk-lkcpmipopqwkzjnckppepdozrxreabkqvoqemsaxyqsoalhe"
 TEMPERATURE=0.1
+TOP_P=0.1
 TEXT_SOURCE="data/p5_eval_pool/pool_v3.jsonl"
 TEST_FILE="data/p5_eval_pool/final/test_final.jsonl"
 
@@ -27,12 +32,13 @@ export OPENAI_API_KEY="$API_KEY"
 
 echo "=========================================="
 echo "THUDM/GLM-4-9B-0414 双 TBox 抽取（仅抽取，不评测）"
+echo "日期后缀: $DATE_SUFFIX (格式: YYYYMMDD_HHMM)"
 echo "=========================================="
 echo ""
 
 # Step 1: TBox S3 抽取
 echo "[1/2] TBox S3 抽取..."
-OUT_DIR_S3="outputs/eval_models_tbox_s3/THUDM_GLM-4-9B-0414"
+OUT_DIR_S3="outputs/eval_models_tbox_s3_${DATE_SUFFIX}/${MODEL_DIR_NAME}"
 mkdir -p "$OUT_DIR_S3"
 
 python scripts/p5/run_extraction_on_test.py \
@@ -41,6 +47,7 @@ python scripts/p5/run_extraction_on_test.py \
     --model "$MODEL" \
     --output "$OUT_DIR_S3/predictions.jsonl" \
     --temperature $TEMPERATURE \
+    --top-p $TOP_P \
     --interval 5 \
     --base-url "$BASE_URL" \
     --text-source "$TEXT_SOURCE" \
@@ -52,7 +59,7 @@ echo "[1/2] ✅ TBox S3 抽取完成: $OUT_DIR_S3/predictions.jsonl"
 # Step 2: TBox S2 抽取
 echo ""
 echo "[2/2] TBox S2 抽取..."
-OUT_DIR_S2="outputs/eval_models_tbox_s2/THUDM_GLM-4-9B-0414"
+OUT_DIR_S2="outputs/eval_models_tbox_s2_${DATE_SUFFIX}/${MODEL_DIR_NAME}"
 mkdir -p "$OUT_DIR_S2"
 
 python scripts/p5/run_extraction_on_test.py \
@@ -61,7 +68,8 @@ python scripts/p5/run_extraction_on_test.py \
     --model "$MODEL" \
     --output "$OUT_DIR_S2/predictions.jsonl" \
     --temperature $TEMPERATURE \
-    --interval 10 \
+    --top-p $TOP_P \
+    --interval 5 \
     --base-url "$BASE_URL" \
     --text-source "$TEXT_SOURCE" \
     --retry-errors
@@ -85,11 +93,11 @@ echo "  bash scripts/p5/run_single_model.sh \\"
 echo "      --model \"$MODEL\" \\"
 echo "      --tbox outputs/cq_pipeline/final/tbox_s3_optimized.json \\"
 echo "      --test-file data/p5_eval_pool/gold_s3_xxx.jsonl \\"
-echo "      --output-base outputs/eval_models_tbox_s3"
+echo "      --output-base outputs/eval_models_tbox_s3_${DATE_SUFFIX}"
 echo ""
 echo "  # S2 评测"
 echo "  bash scripts/p5/run_single_model.sh \\"
 echo "      --model \"$MODEL\" \\"
 echo "      --tbox outputs/cq_pipeline/final/tbox_s2_optimized.json \\"
 echo "      --test-file data/p5_eval_pool/gold_s2_xxx.jsonl \\"
-echo "      --output-base outputs/eval_models_tbox_s2"
+echo "      --output-base outputs/eval_models_tbox_s2_${DATE_SUFFIX}"

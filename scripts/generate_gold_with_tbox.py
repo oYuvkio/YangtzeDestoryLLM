@@ -45,7 +45,15 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from kg.hallucination_filter import HallucinationFilter
-from kg.prompts import parse_cot_response, extract_cot_thought
+from kg.cq_pipeline import format_schema_for_prompt
+from kg.entity_fusion import SimpleEntityNormalizer
+from kg.prompts import (
+    parse_cot_response,
+    extract_cot_thought,
+    UNIFIED_SYSTEM_PROMPT_COT,
+    UNIFIED_USER_PROMPT_COT,
+    UNIFIED_VERIFICATION_THRESHOLD,
+)
 
 
 # ==============================================================================
@@ -57,38 +65,13 @@ def load_tbox(tbox_path: Path) -> Dict[str, Any]:
     return json.loads(tbox_path.read_text(encoding="utf-8"))
 
 
-def format_tbox_for_prompt(tbox: Dict[str, Any], max_classes: int = 40) -> str:
-    """将 TBox 格式化为 Prompt 可用的文本"""
-
-    # 格式化类
-    classes_text = "【实体类型（必须使用以下类型）】\n"
-    for cls in tbox.get("classes", [])[:max_classes]:
-        name = cls.get("name", "")
-        cn_name = cls.get("cn_name", "")
-        definition = cls.get("definition", "")
-        if len(definition) > 60:
-            definition = definition[:60] + "..."
-        classes_text += f"- {name} ({cn_name}): {definition}\n"
-
-    if len(tbox.get("classes", [])) > max_classes:
-        classes_text += f"... 共 {len(tbox['classes'])} 个类\n"
-
-    # 格式化关系
-    relations_text = "\n【关系类型（必须使用以下关系）】\n"
-    relations_text += "| 关系名 | 中文名 | 主语类型 | 宾语类型 |\n"
-    relations_text += "|--------|--------|----------|----------|\n"
-    for rel in tbox.get("relations", []):
-        name = rel.get("name", "")
-        cn_name = rel.get("cn_name", "")
-        domain = rel.get("domain", "")
-        range_ = rel.get("range", "")
-        relations_text += f"| {name} | {cn_name} | {domain} | {range_} |\n"
-
-    return classes_text + relations_text
+def format_extraction_text(text: str) -> str:
+    """与 Pred 抽取保持一致的输入格式。"""
+    return f"【待抽取文本】\n{text.strip()}"
 
 
 # ==============================================================================
-# Prompt 模板
+# Prompt 模板（使用统一的 Prompt，确保 Gold 和 Pred 一致）
 # ==============================================================================
 
 # 普通模式 System Prompt
@@ -145,159 +128,9 @@ USER_PROMPT_TEMPLATE = """请从以下文本中抽取实体和关系三元组。
 
 请直接输出JSON："""
 
-# CoT 模式 System Prompt
-SYSTEM_PROMPT_COT = """你是一名水旱灾害领域知识图谱标注专家。
-你的任务是从文本中抽取高质量的实体和关系三元组，作为评测标准。
-
-【核心原则】
-1. **准确性优先**：所有实体必须是原文的**精确子串**，不可改写
-2. **完整性**：尽可能发现所有符合 Schema 的三元组
-3. **规范性**：严格使用 Schema 中定义的类型和关系
-4. **可追溯**：每条三元组必须有原文证据支撑"""
-
-# CoT 模式 User Prompt
-USER_PROMPT_COT = """请从以下文本中抽取实体和关系三元组。
-
-{tbox_schema}
-
----
-
-【待标注文本】
-```
-{text}
-```
-
----
-
-【⚠️ 关键规则 - 必须严格遵守】
-
-**规则1：区分时间和事件**
-- 判断标准：是否包含灾害性质词（洪水/旱灾/大水/奇旱/涝/决口等）
-- ❌ 错误："乾隆二十九年(1764年)" → DisasterEvent
-  【原因：只有年份，无灾害性质词】
-- ✅ 正确："乾隆二十九年(1764年)" → TemporalEntity
-- ✅ 正确："乾隆五十年(1785年)奇旱" → DroughtEvent
-  【原因：包含"奇旱"灾害词】
-
-**规则2：三元组主语规范**
-- 纯时间不能独立表达"发生了什么"，必须有事件主体
-- ❌ ("1998年", affects_region, "长江流域")
-  【问题：1998年发生了什么？缺少事件主体】
-- ✅ ("1998年长江洪水", affects_region, "长江流域")
-- ✅ ("1998年长江洪水", occurs_at, "1998年")
-
-**规则3：实体必须是原文精确子串**
-- ❌ 合并："长江中下游地区" ← 原文是"长江中下游"
-- ❌ 推断："三峡大坝" ← 原文只有"三峡"
-- ✅ 保持原样：使用原文中完全一致的表述
-
-**规则4：不确定情况的处理**
-- 如果实体类型不确定，优先选择上位类（如用 DisasterEvent 而非具体子类）
-- 如果关系不在 Schema 中，**不要发明新关系**，跳过该三元组
-- **宁可漏抽，不可错抽**
-
----
-
-【示例1：现代水文干旱】
-
-原文片段：
-"以收集的实测水文气象资料为依据,以洞庭湖水系出口控制站岳阳城陵矶水文站水位流量过程线和相关水文气象因子变化情况为参照,兼顾全省抗旱应急调度有关时间节点,将2022年水文干旱过程划分为四个阶段...第一阶段(干旱露头):2022年7月8日—8月底。7月8日全省集中降雨基本结束,天气转入高温少雨阶段,来水偏少,洞庭湖8月4日达到枯水位(24.50 m),为1971年以来最早,洞庭湖汛期反枯,涝旱急转,8月12日全省启动抗旱Ⅳ级应急响应。"
-
-正确输出：
-```json
-{{
-  "entities": [
-    {{"name": "2022年水文干旱过程", "type": "DroughtEvent"}},
-    {{"name": "城陵矶水文站", "type": "HydrologicalStation"}},
-    {{"name": "洞庭湖", "type": "Lake"}},
-    {{"name": "2022年7月8日", "type": "TemporalEntity"}},
-    {{"name": "抗旱Ⅳ级应急响应", "type": "EmergencyResponse"}}
-  ],
-  "triples": [
-    {{"subject": "城陵矶水文站", "predicate": "monitors_river", "object": "洞庭湖", "evidence": "洞庭湖水系出口控制站岳阳城陵矶水文站", "confidence": "high"}},
-    {{"subject": "2022年水文干旱过程", "predicate": "occurs_at", "object": "2022年7月8日", "evidence": "2022年7月8日—8月底", "confidence": "high"}},
-    {{"subject": "2022年水文干旱过程", "predicate": "triggers_response", "object": "抗旱Ⅳ级应急响应", "evidence": "8月12日全省启动抗旱Ⅳ级应急响应", "confidence": "high"}}
-  ]
-}}
-```
-
----
-
-【示例2：历史灾害记录】
-
-原文片段：
-"清代无为有水、旱、震、疫、风、雪、雹、虫等自然灾害共158次。其中水灾达60次,占比近38%,旱灾33次,占比近21%...乾隆五十年(1785年)奇旱,"自去冬至是年终岁无雨,江潮闭,山田籽粒无收,圩之滨河者收三十之一";五十一年(1786年)春仍旱,大饥而疫死者弥望。"
-
-正确输出：
-```json
-{{
-  "entities": [
-    {{"name": "无为", "type": "GeographicRegion"}},
-    {{"name": "乾隆五十年(1785年)奇旱", "type": "DroughtEvent"}},
-    {{"name": "水灾", "type": "DisasterEvent"}},
-    {{"name": "大饥", "type": "DisasterImpact"}}
-  ],
-  "triples": [
-    {{"subject": "水灾", "predicate": "affects_region", "object": "无为", "evidence": "其中水灾达60次", "confidence": "high"}},
-    {{"subject": "乾隆五十年(1785年)奇旱", "predicate": "affects_region", "object": "无为", "evidence": "乾隆五十年(1785年)奇旱,自去冬至是年终岁无雨", "confidence": "high"}},
-    {{"subject": "乾隆五十年(1785年)奇旱", "predicate": "causes_impact", "object": "大饥", "evidence": "大饥而疫死者弥望", "confidence": "high"}}
-  ]
-}}
-```
-
----
-
-【抽取步骤】请严格按以下步骤思考（Chain-of-Thought）：
-
-**Step 1: 实体扫描**
-仔细阅读文本，识别所有可能的实体，标注其类型。
-- 自检：每个实体是否在原文中**原样出现**？
-- 自检：实体类型是否在 Schema 的 classes 列表中？
-- 特别注意：纯时间（如"1998年"）应标为 TemporalEntity，不是 DisasterEvent
-
-**Step 2: 关系识别**
-对识别出的实体对，判断是否存在 Schema 定义的关系。
-- 检查：关系是否在 Schema 的 relations 列表中？
-- 检查：主语/宾语类型是否符合 domain/range 约束？
-- 检查：原文是否明确支持这个关系？
-- 特别注意：纯时间不能作为三元组主语，应使用 occurs_at 连接事件和时间
-
-**Step 3: 证据回溯**
-为每条三元组标注原文支撑句（evidence）。
-- 如找不到明确支撑，标记 confidence 为 "low"
-- 如关系需要推理，标记 confidence 为 "medium"
-- 如关系在原文中直接表述，标记 confidence 为 "high"
-
-**Step 4: 输出**
-
-请先输出【思考过程】（50-150字，简述关键实体和推理逻辑），然后输出 JSON：
-
-```json
-{{
-  "entities": [
-    {{"name": "实体名（原文子串）", "type": "Schema中的类型"}}
-  ],
-  "triples": [
-    {{
-      "subject": "主语（原文子串）",
-      "predicate": "Schema中的关系名",
-      "object": "宾语（原文子串）",
-      "evidence": "原文支撑句",
-      "confidence": "high/medium/low"
-    }}
-  ],
-  "events": [
-    {{
-      "name": "事件名称",
-      "event_type": "DisasterEvent/DroughtEvent等",
-      "time": {{"start_time": "", "end_time": ""}},
-      "location": ["地点"]
-    }}
-  ]
-}}
-```
-
-请直接输出："""
+# CoT 模式使用统一的 Prompt（从 kg/prompts.py 导入）
+SYSTEM_PROMPT_COT = UNIFIED_SYSTEM_PROMPT_COT
+USER_PROMPT_COT = UNIFIED_USER_PROMPT_COT
 
 
 # ==============================================================================
@@ -398,12 +231,13 @@ def generate_gold_for_sample(
         包含 entities, triples, events 的字典
     """
     # 选择 Prompt
+    prompt_text = format_extraction_text(text)
     if use_cot:
         system_prompt = SYSTEM_PROMPT_COT
-        user_prompt = USER_PROMPT_COT.format(tbox_schema=tbox_schema, text=text)
+        user_prompt = USER_PROMPT_COT.format(tbox_schema=tbox_schema, text=prompt_text)
     else:
         system_prompt = SYSTEM_PROMPT
-        user_prompt = USER_PROMPT_TEMPLATE.format(tbox_schema=tbox_schema, text=text)
+        user_prompt = USER_PROMPT_TEMPLATE.format(tbox_schema=tbox_schema, text=prompt_text)
 
     raw_response = ""
 
@@ -470,6 +304,10 @@ def generate_gold_for_sample(
         if verified.filtered_triples:
             result["_filtered_by_verification"] = verified.filtered_triples
 
+    # 实体标准化（与 Pred 抽取保持一致）
+    normalizer = SimpleEntityNormalizer()
+    result["triples"] = normalizer.normalize_triples(result.get("triples", []))
+
     # TBox 约束过滤
     result = validate_against_tbox(result, tbox)
 
@@ -477,40 +315,43 @@ def generate_gold_for_sample(
 
 
 def validate_against_tbox(result: Dict, tbox: Dict) -> Dict:
-    """验证结果是否符合 TBox 约束，过滤不合规的"""
+    """验证结果是否符合 TBox 约束，只标记不剔除（与 Pred 抽取保持一致）"""
 
     valid_relations = {r["name"] for r in tbox.get("relations", [])}
     valid_classes = {c["name"] for c in tbox.get("classes", [])}
 
-    # 过滤三元组
-    valid_triples = []
-    filtered_count = 0
+    # 标记三元组（不剔除）
+    invalid_predicate_count = 0
     for t in result.get("triples", []):
         pred = t.get("predicate", "")
-        if pred in valid_relations:
-            valid_triples.append(t)
-        else:
-            filtered_count += 1
+        if pred and pred not in valid_relations:
+            t["_invalid_predicate"] = True
+            invalid_predicate_count += 1
 
-    result["triples"] = valid_triples
-    if filtered_count > 0:
-        result["_tbox_filtered"] = filtered_count
+    if invalid_predicate_count > 0:
+        result["_tbox_invalid_predicates"] = invalid_predicate_count
 
-    # 过滤实体（可选，不太严格）
-    valid_entities = []
+    # 标记实体（不剔除）
+    invalid_entity_count = 0
     for e in result.get("entities", []):
         etype = e.get("type", "")
-        if etype in valid_classes or not etype:  # 允许无类型
-            valid_entities.append(e)
-    result["entities"] = valid_entities
+        if etype and etype not in valid_classes:
+            e["_invalid_type"] = True
+            invalid_entity_count += 1
 
-    # 过滤事件
-    valid_events = []
+    if invalid_entity_count > 0:
+        result["_tbox_invalid_entities"] = invalid_entity_count
+
+    # 标记事件（不剔除）
+    invalid_event_count = 0
     for ev in result.get("events", []):
         etype = ev.get("event_type", "")
-        if etype in valid_classes or not etype:
-            valid_events.append(ev)
-    result["events"] = valid_events
+        if etype and etype not in valid_classes:
+            ev["_invalid_event_type"] = True
+            invalid_event_count += 1
+
+    if invalid_event_count > 0:
+        result["_tbox_invalid_events"] = invalid_event_count
 
     return result
 
@@ -575,8 +416,8 @@ def main() -> None:
     verify_group.add_argument("--no-verification", action="store_true",
                               help="禁用后校验")
 
-    parser.add_argument("--verification-threshold", type=float, default=0.7,
-                        help="模糊匹配阈值（Gold 推荐 0.7，默认 0.7）")
+    parser.add_argument("--verification-threshold", type=float, default=UNIFIED_VERIFICATION_THRESHOLD,
+                        help=f"模糊匹配阈值（默认 {UNIFIED_VERIFICATION_THRESHOLD}，与 Pred 保持一致）")
     parser.add_argument("--strict-mode", action="store_true",
                         help="严格模式（仅精确匹配，不推荐用于 Gold）")
 
@@ -611,7 +452,7 @@ def main() -> None:
     # 加载 TBox
     print(f"📋 加载 TBox: {tbox_path}")
     tbox = load_tbox(tbox_path)
-    tbox_schema = format_tbox_for_prompt(tbox)
+    tbox_schema = format_schema_for_prompt(tbox, style="markdown")
     print(f"   - 类数: {len(tbox.get('classes', []))}")
     print(f"   - 关系数: {len(tbox.get('relations', []))}")
 
@@ -694,7 +535,7 @@ def main() -> None:
     success = 0
     errors = 0
     total_triples = 0
-    total_tbox_filtered = 0
+    total_tbox_invalid = 0
     total_verification_filtered = 0
 
     print(f"\n🚀 开始处理...")
@@ -758,9 +599,9 @@ def main() -> None:
             else:
                 success += 1
                 n_triples = len(result.get("triples", []))
-                n_tbox_filtered = result.get("_tbox_filtered", 0)
+                n_tbox_invalid = result.get("_tbox_invalid_predicates", 0)
                 total_triples += n_triples
-                total_tbox_filtered += n_tbox_filtered
+                total_tbox_invalid += n_tbox_invalid
 
                 # 统计幻觉过滤
                 v_stats = result.get("_verification_stats", {})
@@ -769,8 +610,8 @@ def main() -> None:
 
                 # 输出信息
                 info_parts = [f"三元组={n_triples}"]
-                if n_tbox_filtered > 0:
-                    info_parts.append(f"TBox过滤={n_tbox_filtered}")
+                if n_tbox_invalid > 0:
+                    info_parts.append(f"TBox无效谓词={n_tbox_invalid}")
                 if n_v_filtered > 0:
                     info_parts.append(f"幻觉过滤={n_v_filtered}")
                 if result.get("_thinking"):
@@ -785,7 +626,7 @@ def main() -> None:
     print(f"   - 成功: {success}")
     print(f"   - 错误: {errors}")
     print(f"   - 总三元组: {total_triples}")
-    print(f"   - TBox 过滤: {total_tbox_filtered}")
+    print(f"   - TBox 无效谓词: {total_tbox_invalid}")
     print(f"   - 幻觉过滤: {total_verification_filtered}")
     print(f"📁 输出: {output_path}")
 
