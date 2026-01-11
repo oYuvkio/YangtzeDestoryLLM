@@ -2,12 +2,14 @@
 #===============================================================================
 # UIE Baseline 评测脚本
 #
-# 流程：抽取 → 对齐 →（可选）关系映射 → 评测（回退/原始类型）
+# 流程：抽取（NER+RE）→ 对齐 →（可选）关系映射 → 评测（分任务 Entity/Triple/Event）
 #
 # 使用方式：
-#   bash scripts/p5/baseline/run_uie_baseline.sh \
-#       --tbox outputs/cq_pipeline/final/p4_tbox_dedup_s2_allow1_20260102_232204_t0p80.json \
+#   bash scripts/p5/baseline/uie/run_uie_baseline.sh \
+#       --tbox outputs/kg_final/tbox_final.json \
 #       --test-file data/p5_eval_pool/final/test_final.jsonl \
+#       --gold-file data/p5_eval_pool/gold_hybrid_tbox.jsonl \
+#       --text-source data/corpus_for_kg/filtered_ytz_corpus/light_pool_v2_dedup.jsonl \
 #       --relation-mapping configs/relation_mapping.json
 #===============================================================================
 
@@ -36,11 +38,15 @@ PRECISION="float16"
 BATCH_SIZE=1
 INTERVAL=0
 LIMIT_COUNT=""
-TBOX="outputs/cq_pipeline/final/tbox_s2_optimized.json"
-TEST_FILE="data/p5_eval_pool/gold_s2_tbox_full_0105.jsonl"
-OUTPUT_BASE="outputs/eval_models_tbox_s2"
+TBOX="outputs/kg_final/tbox_final.json"
+TEST_FILE="data/p5_eval_pool/final/test_final.jsonl"
+# Gold 文件用于评测（与 TEST_FILE 分离，TEST_FILE 用于获取 doc_id 列表）
+GOLD_FILE="data/p5_eval_pool/gold_hybrid_tbox.jsonl"
+OUTPUT_BASE="outputs/eval_models_hybrid"
 REL_MAPPING=""
-TEXT_SOURCE=""
+# 完整文本来源：使用 light_pool_v2_dedup.jsonl 的 text 字段（未截断）
+TEXT_SOURCE="data/corpus_for_kg/filtered_ytz_corpus/light_pool_v2_dedup.jsonl"
+TASK="all"  # ner, re, all
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -72,6 +78,10 @@ while [[ $# -gt 0 ]]; do
             TEST_FILE="$2"
             shift 2
             ;;
+        --gold-file)
+            GOLD_FILE="$2"
+            shift 2
+            ;;
         --output-base)
             OUTPUT_BASE="$2"
             shift 2
@@ -88,6 +98,10 @@ while [[ $# -gt 0 ]]; do
             TEXT_SOURCE="$2"
             shift 2
             ;;
+        --task)
+            TASK="$2"
+            shift 2
+            ;;
         --help)
             echo "使用方式:"
             echo "  --model-name       PP-UIE 模型名称（默认 paddlenlp/PP-UIE-0.5B，可选 1.5B/7B/14B）"
@@ -96,10 +110,12 @@ while [[ $# -gt 0 ]]; do
             echo "  --interval         样本间隔秒数（默认 0）"
             echo "  --limit            最多处理样本数"
             echo "  --tbox             TBox 文件路径（必填）"
-            echo "  --test-file        测试集文件路径（必填）"
-            echo "  --output-base      输出基目录（默认 outputs/eval_models）"
+            echo "  --test-file        测试集文件路径（用于获取 doc_id 列表）"
+            echo "  --gold-file        Gold 标注文件路径（用于评测对比）"
+            echo "  --output-base      输出基目录（默认 outputs/eval_models_hybrid）"
             echo "  --relation-mapping 关系映射配置文件路径（可选）"
-            echo "  --text-source      完整文本来源文件（可选，通过 doc_id 映射获取完整文本）"
+            echo "  --text-source      完整文本来源文件（推荐 light_pool_v2_dedup.jsonl）"
+            echo "  --task             任务类型：ner（仅实体识别）, re（仅关系抽取）, all（全部，默认）"
             exit 0
             ;;
         *)
@@ -124,23 +140,30 @@ if [ ! -f "$TEST_FILE" ]; then
     exit 1
 fi
 
+if [ -n "$GOLD_FILE" ] && [ ! -f "$GOLD_FILE" ]; then
+    echo "[ERROR] Gold 文件不存在: $GOLD_FILE"
+    exit 1
+fi
+
 MODEL_DIR="uie_${MODEL_NAME//\//_}"
 MODEL_DIR="${MODEL_DIR//:/_}"
 OUT_DIR="$OUTPUT_BASE/$MODEL_DIR"
 mkdir -p "$OUT_DIR"
 
 echo "============================================================"
-echo "UIE Baseline 评测"
+echo "UIE Baseline 评测（分任务：NER/RE/EE）"
 echo "============================================================"
 echo "Model: $MODEL_NAME"
 echo "Precision: $PRECISION"
 echo "Batch Size: $BATCH_SIZE"
 echo "Interval: $INTERVAL"
 echo "Limit: ${LIMIT_COUNT:-未设置}"
+echo "Task: $TASK"
 echo "TBox: $TBOX"
 echo "Test: $TEST_FILE"
+echo "Gold: ${GOLD_FILE:-与 Test 相同}"
 echo "Relation Mapping: ${REL_MAPPING:-未启用}"
-echo "Text Source: ${TEXT_SOURCE:-未设置（使用输入文件中的文本）}"
+echo "Text Source: ${TEXT_SOURCE:-未设置（可能导致无文本）}"
 echo "Output: $OUT_DIR"
 echo "============================================================"
 echo ""
@@ -154,6 +177,8 @@ TEXT_SOURCE_FLAG=""
 if [ -n "$TEXT_SOURCE" ]; then
     TEXT_SOURCE_FLAG="--text-source $TEXT_SOURCE"
 fi
+
+TASK_FLAG="--task $TASK"
 
 PRED_FILE="$OUT_DIR/predictions.jsonl"
 ALIGNED_FILE="$OUT_DIR/predictions_aligned.jsonl"
@@ -182,7 +207,8 @@ if [ -f "$PRED_FILE" ]; then
             --interval "$INTERVAL" \
             --skip-existing \
             $LIMIT_FLAG \
-            $TEXT_SOURCE_FLAG
+            $TEXT_SOURCE_FLAG \
+            $TASK_FLAG
     fi
 else
     python scripts/p5/baseline/uie/run_uie_baseline.py \
@@ -194,13 +220,16 @@ else
         --output "$PRED_FILE" \
         --interval "$INTERVAL" \
         $LIMIT_FLAG \
-        $TEXT_SOURCE_FLAG
+        $TEXT_SOURCE_FLAG \
+        $TASK_FLAG
 fi
 
 echo ""
 echo "[Step 2] 对齐..."
+# 使用 GOLD_FILE 进行对齐（如果未指定则使用 TEST_FILE）
+GOLD_FOR_ALIGN="${GOLD_FILE:-$TEST_FILE}"
 python scripts/p5/align_pred_to_gold.py \
-    --gold "$TEST_FILE" \
+    --gold "$GOLD_FOR_ALIGN" \
     --pred "$PRED_FILE" \
     --out "$ALIGNED_FILE" \
     --report "$ALIGN_REPORT"
@@ -210,7 +239,7 @@ echo "[Step 2.1] 过滤 Gold/Pred 中的 error 行..."
 GOLD_FILTERED="$OUT_DIR/gold_filtered.jsonl"
 PRED_FILTERED="$OUT_DIR/predictions_filtered.jsonl"
 python scripts/p5/filter_gold_errors.py \
-    --gold "$TEST_FILE" \
+    --gold "$GOLD_FOR_ALIGN" \
     --pred "$ALIGNED_FILE" \
     --gold-out "$GOLD_FILTERED" \
     --pred-out "$PRED_FILTERED"

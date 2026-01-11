@@ -107,7 +107,7 @@ P5_EXTRACTION_PROMPT_COT = """
 TBox 定义（classes / relations / attributes）：
 {schema_json}
 
-事件 Schema 参考：
+事件结构参考：
 {event_schema}
 
 ---

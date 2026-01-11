@@ -15,7 +15,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from kg.utils.deduplication import EmbeddingDeduplicator
 from kg.utils.schema_alignment import SchemaAligner
-from .llm_core import LLMFactory, LLMBackend
+from .llm_core import (
+    LLMFactory,
+    LLMBackend,
+    RateLimitError,
+    AccountBlockedError,
+    ServiceUnavailableError,
+    EndpointNotFoundError,
+)
 from .prompts import (
     P1_CQ_PROMPT,
     P2_SCHEMA_PROMPT,
@@ -23,16 +30,16 @@ from .prompts import (
     P4_AUGMENT_PROMPT,
     P5_EXTRACTION_PROMPT,
     EVENT_SCHEMA_HINT,
-    P5_COT_EXTRACTION_PROMPT,
+    P5_GRAPH_COT_EXTRACTION_PROMPT,
     parse_cot_response,
     extract_cot_thought,
     UNIFIED_SYSTEM_PROMPT_COT,
-    UNIFIED_USER_PROMPT_COT,
     UNIFIED_VERIFICATION_THRESHOLD,
 )
 from kg.utils.entity_linking import EntityNormalizer, normalize_entity
 from kg.hallucination_filter import HallucinationFilter, filter_hallucinations, VerificationResult
 from kg.entity_fusion import EntityFusion, fuse_knowledge, SimpleEntityNormalizer
+from kg.graph_structure import get_graph_structure_for_text
 
 
 logger = logging.getLogger(__name__)
@@ -167,6 +174,10 @@ def format_schema_for_prompt(schema_json: Dict[str, Any], style: str = "markdown
         cn_name = rel.get("cn_name", "")
         domain = rel.get("domain", "")
         range_ = rel.get("range", "")
+        if isinstance(domain, (list, tuple)):
+            domain = ", ".join([str(d) for d in domain])
+        if isinstance(range_, (list, tuple)):
+            range_ = ", ".join([str(r) for r in range_])
         definition = rel.get("definition", "")
         if len(definition) > 30:
             definition = definition[:30] + "..."
@@ -583,7 +594,7 @@ class CQLLMPipeline:
         schema: TBoxSchema,
         save_path: Optional[Path] = None,
         favor_existing_classes: bool = True,
-        use_cot: bool = False,
+        use_cot: bool = True,
     ) -> Dict[str, Any]:
         """
         在 TBox 约束下抽取事件与三元组。
@@ -599,22 +610,36 @@ class CQLLMPipeline:
 
         thought = ""
         if use_cot:
-            user_prompt = P5_COT_EXTRACTION_PROMPT.format(
+            graph_structure, _, _ = get_graph_structure_for_text(paragraph)
+            graph_prompt = graph_structure.format_for_prompt()
+            graph_steps = "\n\n".join(graph_structure.get_cot_steps())
+            user_prompt = P5_GRAPH_COT_EXTRACTION_PROMPT.format(
                 schema_json=schema_json,
                 event_schema=EVENT_SCHEMA_HINT,
                 input_text=paragraph.strip(),
                 class_usage_hint=class_usage_hint,
+                graph_prompt=graph_prompt,
+                graph_steps=graph_steps,
             )
             messages = [
                 {"role": "system", "content": "你是水旱灾害知识图谱构建专家，请按照思维链格式输出。"},
                 {"role": "user", "content": user_prompt},
             ]
-            raw_response = self.llm.chat_messages(messages, json_mode=False)
+            try:
+                raw_response = self.llm.chat_messages(messages, json_mode=False)
+            except Exception as exc:
+                error_code = self._map_llm_exception(exc)
+                logger.error(f"[P5] LLM 调用失败，error={error_code}: {exc}")
+                return self._build_error_result(error_code)
+
+            if not str(raw_response or "").strip():
+                logger.error("[P5] LLM 返回空响应")
+                return self._build_error_result("llm_empty_response")
             thought = extract_cot_thought(raw_response)
             res = parse_cot_response(raw_response)
             if res is None:
-                logger.warning("[P5] CoT 响应解析失败，返回空结果")
-                res = {"events": [], "triples": []}
+                logger.warning("[P5] CoT 响应解析失败，记录错误并返回空结果")
+                res = {"events": [], "triples": [], "error": "cot_parse_failed"}
         else:
             user_prompt = P5_EXTRACTION_PROMPT.format(
                 schema_json=schema_json,
@@ -623,6 +648,9 @@ class CQLLMPipeline:
                 class_usage_hint=class_usage_hint,
             )
             res = self.client.call("仅输出 JSON，不要解释。", user_prompt)
+            if not self._has_p5_keys(res):
+                logger.warning("[P5] JSON 结果缺少 events/triples 字段")
+                res = {"events": [], "triples": [], "error": "missing_events_triples"}
 
         res = self._sanitize_p5_result(res, schema)
         if use_cot and thought:
@@ -644,9 +672,13 @@ class CQLLMPipeline:
         if not isinstance(res, dict):
             logger.warning("[P5] LLM 返回非 dict，已置空。")
             return {"events": [], "triples": [], "error": "invalid_response_type"}
+        if "events" not in res and "triples" not in res:
+            logger.warning("[P5] LLM 返回缺少 events/triples 字段，已置空。")
+            return {"events": [], "triples": [], "error": "missing_events_triples"}
 
         events = res.get("events") if isinstance(res.get("events"), list) else []
         triples = res.get("triples") if isinstance(res.get("triples"), list) else []
+        error_code = res.get("error") if isinstance(res.get("error"), str) else ""
 
         allowed_event_types = {c.name for c in schema.classes if c.name}
         allowed_predicates = {r.name for r in schema.relations if r.name}
@@ -723,7 +755,108 @@ class CQLLMPipeline:
         if invalid_predicate_count:
             logger.warning(f"[P5] 发现不在 TBox 中的 predicate: {invalid_predicate_count} 个，已标记 _invalid_predicate=True。")
 
-        return {"events": cleaned_events, "triples": cleaned_triples}
+        result = {"events": cleaned_events, "triples": cleaned_triples}
+        if error_code:
+            result["error"] = error_code
+        return result
+
+    @staticmethod
+    def _build_error_result(error_code: str) -> Dict[str, Any]:
+        """构造统一的错误结果结构。"""
+        return {"events": [], "triples": [], "error": error_code}
+
+    @staticmethod
+    def _map_llm_exception(exc: Exception) -> str:
+        """将 LLM 异常映射为可追踪的错误码。"""
+        if isinstance(exc, RateLimitError):
+            return "llm_rate_limited"
+        if isinstance(exc, EndpointNotFoundError):
+            return "llm_endpoint_not_found"
+        if isinstance(exc, AccountBlockedError):
+            return "llm_unauthorized"
+        if isinstance(exc, ServiceUnavailableError):
+            return "llm_service_unavailable"
+        msg = str(exc).lower()
+        if "429" in msg or "rate limit" in msg:
+            return "llm_rate_limited"
+        if "timeout" in msg or "timed out" in msg:
+            return "llm_timeout"
+        return "llm_error"
+
+    @staticmethod
+    def _has_p5_keys(res: Any) -> bool:
+        """检查是否包含 P5 期望字段。"""
+        return isinstance(res, dict) and ("events" in res or "triples" in res)
+
+    @staticmethod
+    def _normalize_type_list(value: Any) -> List[str]:
+        """统一将类型字段转为小写列表，便于一致性校验。"""
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return [str(v).strip().lower() for v in value if str(v).strip()]
+        text = str(value).strip()
+        if not text:
+            return []
+        return [text.lower()]
+
+    def _filter_triples_by_schema(
+        self,
+        triples: List[Dict[str, Any]],
+        schema: TBoxSchema,
+        strict_mode: bool = False,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Schema 一致性校验：
+        - predicate 必须在 TBox.relations 中
+        - 若提供 subject_type/object_type，则按 domain/range 校验
+        """
+        relation_map = {r.name: r for r in schema.relations if r.name}
+        valid_triples: List[Dict[str, Any]] = []
+        rejected: List[Dict[str, Any]] = []
+
+        for triple in triples:
+            if not isinstance(triple, dict):
+                continue
+            predicate = (triple.get("predicate") or "").strip()
+            if predicate not in relation_map:
+                rejected.append({**triple, "filter_reason": "predicate_not_in_tbox"})
+                continue
+
+            rel = relation_map[predicate]
+            domain_list = self._normalize_type_list(getattr(rel, "domain", rel.__dict__.get("domain")))
+            range_list = self._normalize_type_list(getattr(rel, "range", rel.__dict__.get("range")))
+
+            subject_type = (triple.get("subject_type") or "").strip()
+            object_type = (triple.get("object_type") or "").strip()
+
+            subject_ok = True
+            object_ok = True
+
+            if subject_type and domain_list:
+                subject_ok = subject_type.lower() in domain_list
+            if object_type and range_list:
+                object_ok = object_type.lower() in range_list
+
+            if subject_ok and object_ok:
+                valid_triples.append(triple)
+                continue
+
+            reason_parts = []
+            if not subject_ok:
+                reason_parts.append("subject_type_not_in_domain")
+            if not object_ok:
+                reason_parts.append("object_type_not_in_range")
+            reason = ",".join(reason_parts) if reason_parts else "schema_mismatch"
+
+            if strict_mode:
+                rejected.append({**triple, "filter_reason": reason})
+            else:
+                triple = dict(triple)
+                triple["_schema_warning"] = reason
+                valid_triples.append(triple)
+
+        return valid_triples, rejected
 
     # ---------- 工具函数 ----------
     @staticmethod
@@ -793,6 +926,7 @@ class CQLLMPipeline:
         use_cot: bool = True,
         strict_filter: bool = True,
         fuzzy_threshold: float = UNIFIED_VERIFICATION_THRESHOLD,
+        strict_schema: bool = False,
     ) -> Dict[str, Any]:
         """
         带原文回溯校验的知识抽取（P5 + 幻觉过滤）。
@@ -833,39 +967,51 @@ class CQLLMPipeline:
         # 构建输入文本（带上下文标记）
         input_text = self._format_context_input(paragraph, context_before, context_after)
 
-        # 构建 TBox Schema 文本（使用 format_schema_for_prompt）
-        tbox_schema = format_schema_for_prompt(schema.to_dict(), style="markdown")
+        # 构建 TBox Schema 文本（JSON）
+        schema_json = json.dumps(schema.to_dict(), ensure_ascii=False, indent=2)
 
         # 选择 Prompt 模板
         thought = ""
+        if favor_existing_classes:
+            class_usage_hint = "优先使用 TBox 中已有的类名，不要随意创造新的事件类型；倾向用已有类 + 属性表达。"
+        else:
+            class_usage_hint = "允许充分使用 TBox 中新增的细粒度类（如新补充的 HazardFactor 子类等），鼓励细分事件类型。"
         if use_cot:
-            # 使用统一的 CoT Prompt（与 Gold 标注一致）
-            user_prompt = UNIFIED_USER_PROMPT_COT.format(
-                tbox_schema=tbox_schema,
-                text=input_text,
+            graph_structure, _, _ = get_graph_structure_for_text(paragraph)
+            graph_prompt = graph_structure.format_for_prompt()
+            graph_steps = "\n\n".join(graph_structure.get_cot_steps())
+            user_prompt = P5_GRAPH_COT_EXTRACTION_PROMPT.format(
+                schema_json=schema_json,
+                event_schema=EVENT_SCHEMA_HINT,
+                input_text=input_text,
+                class_usage_hint=class_usage_hint,
+                graph_prompt=graph_prompt,
+                graph_steps=graph_steps,
             )
-            # CoT 模式需要特殊处理响应
             messages = [
                 {"role": "system", "content": UNIFIED_SYSTEM_PROMPT_COT},
                 {"role": "user", "content": user_prompt},
             ]
-            raw_response = self.llm.chat_messages(messages, json_mode=False)
+            try:
+                raw_response = self.llm.chat_messages(messages, json_mode=False)
+            except Exception as exc:
+                error_code = self._map_llm_exception(exc)
+                logger.error(f"[P5+] LLM 调用失败，error={error_code}: {exc}")
+                return self._build_error_result(error_code)
 
             # 提取思考过程
+            if not str(raw_response or "").strip():
+                logger.error("[P5+] LLM 返回空响应")
+                return self._build_error_result("llm_empty_response")
             thought = extract_cot_thought(raw_response)
 
             # 解析 JSON 结果
             res = parse_cot_response(raw_response)
             if res is None:
-                logger.warning("[P5+] CoT 响应解析失败，返回空结果")
-                res = {"events": [], "triples": []}
+                logger.warning("[P5+] CoT 响应解析失败，记录错误并返回空结果")
+                res = {"events": [], "triples": [], "error": "cot_parse_failed"}
         else:
             # 非 CoT 模式使用原有的 P5_EXTRACTION_PROMPT
-            schema_json = json.dumps(schema.to_dict(), ensure_ascii=False, indent=2)
-            if favor_existing_classes:
-                class_usage_hint = "优先使用 TBox 中已有的类名，不要随意创造新的事件类型；倾向用已有类 + 属性表达。"
-            else:
-                class_usage_hint = "允许充分使用 TBox 中新增的细粒度类（如新补充的 HazardFactor 子类等），鼓励细分事件类型。"
             user_prompt = P5_EXTRACTION_PROMPT.format(
                 schema_json=schema_json,
                 event_schema=EVENT_SCHEMA_HINT,
@@ -873,9 +1019,14 @@ class CQLLMPipeline:
                 class_usage_hint=class_usage_hint,
             )
             res = self.client.call("仅输出 JSON，不要解释。", user_prompt)
+            if not self._has_p5_keys(res):
+                logger.warning("[P5+] JSON 结果缺少 events/triples 字段")
+                res = {"events": [], "triples": [], "error": "missing_events_triples"}
 
         # 清洗 P5 结果
         res = self._sanitize_p5_result(res, schema)
+        if res.get("error"):
+            return res
 
         # 幻觉过滤
         logger.info("[P5+] 执行原文回溯校验...")
@@ -893,21 +1044,31 @@ class CQLLMPipeline:
             context_after=context_after,
         )
 
+        # Schema 一致性校验（关系合法性）
+        schema_valid_triples, schema_filtered_triples = self._filter_triples_by_schema(
+            verified.valid_triples,
+            schema,
+            strict_mode=strict_schema,
+        )
+
         # 实体标准化
         normalizer = SimpleEntityNormalizer()
-        normalized_triples = normalizer.normalize_triples(verified.valid_triples)
+        normalized_triples = normalizer.normalize_triples(schema_valid_triples)
 
         # 组装结果
         result = {
             "events": verified.valid_events,
             "triples": normalized_triples,
             "filtered_triples": verified.filtered_triples,
+            "schema_filtered_triples": schema_filtered_triples,
             "hallucination_rate": verified.hallucination_rate / 100.0,  # 转为 0-1
             "thought": thought,
             "stats": {
                 "total_triples": verified.total_triples,
                 "valid_triples": verified.valid_count,
                 "filtered_triples": verified.filtered_count,
+                "schema_filtered_triples": len(schema_filtered_triples),
+                "after_schema": len(schema_valid_triples),
                 "hallucination_rate_pct": f"{verified.hallucination_rate:.2f}%",
             },
             "verification_log": verified.verification_log,
@@ -918,7 +1079,7 @@ class CQLLMPipeline:
 
         logger.info(
             f"[P5+] 完成: 事件 {len(result['events'])} 个, "
-            f"有效三元组 {verified.valid_count}/{verified.total_triples}, "
+            f"有效三元组 {len(schema_valid_triples)}/{verified.total_triples}, "
             f"幻觉率 {verified.hallucination_rate:.2f}%"
         )
 
@@ -935,6 +1096,7 @@ class CQLLMPipeline:
         use_cot: bool = True,
         strict_filter: bool = True,
         fuzzy_threshold: float = 0.8,
+        strict_schema: bool = False,
         alias_dict: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
@@ -978,6 +1140,7 @@ class CQLLMPipeline:
             use_cot=use_cot,
             strict_filter=strict_filter,
             fuzzy_threshold=fuzzy_threshold,
+            strict_schema=strict_schema,
         )
 
         # 2. 知识融合
@@ -1000,6 +1163,7 @@ class CQLLMPipeline:
             "events": extraction_result.get("events", []),
             "triples": fused_triples,
             "filtered_triples": extraction_result.get("filtered_triples", []),
+            "schema_filtered_triples": extraction_result.get("schema_filtered_triples", []),
             "hallucination_rate": extraction_result.get("hallucination_rate", 0.0),
             "thought": extraction_result.get("thought", ""),
             "stats": extraction_result.get("stats", {}),

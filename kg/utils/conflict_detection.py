@@ -56,6 +56,16 @@ def detect_schema_conflicts(tbox: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     # 2) 关系完整性与重复签名/多重定义
     rel_signatures: Dict[str, Set[tuple]] = {}
+    def freeze(value):
+        if isinstance(value, (list, tuple, set)):
+            return tuple(value)
+        return value
+
+    def iter_types(value):
+        if isinstance(value, (list, tuple, set)):
+            return [v for v in value if v]
+        return [value] if value else []
+
     for r in relations:
         name = r.get("name")
         dom = r.get("domain")
@@ -73,26 +83,28 @@ def detect_schema_conflicts(tbox: Dict[str, Any]) -> List[Dict[str, Any]]:
             )
             continue
 
-        if dom not in class_names:
-            conflicts.append(
-                {
-                    "type": "dangling_domain",
-                    "relation": name,
-                    "domain": dom,
-                    "message": f"关系 '{name}' 的 domain '{dom}' 不在类集合中",
-                }
-            )
-        if rng not in class_names:
-            conflicts.append(
-                {
-                    "type": "dangling_range",
-                    "relation": name,
-                    "range": rng,
-                    "message": f"关系 '{name}' 的 range '{rng}' 不在类集合中",
-                }
-            )
+        for dom_item in iter_types(dom):
+            if dom_item not in class_names:
+                conflicts.append(
+                    {
+                        "type": "dangling_domain",
+                        "relation": name,
+                        "domain": dom_item,
+                        "message": f"关系 '{name}' 的 domain '{dom_item}' 不在类集合中",
+                    }
+                )
+        for rng_item in iter_types(rng):
+            if rng_item not in class_names:
+                conflicts.append(
+                    {
+                        "type": "dangling_range",
+                        "relation": name,
+                        "range": rng_item,
+                        "message": f"关系 '{name}' 的 range '{rng_item}' 不在类集合中",
+                    }
+                )
 
-        rel_signatures.setdefault(name, set()).add((dom, rng, definition))
+        rel_signatures.setdefault(name, set()).add((freeze(dom), freeze(rng), definition))
         if len(rel_signatures[name]) > 1:
             conflicts.append(
                 {
@@ -118,8 +130,10 @@ def detect_schema_conflicts(tbox: Dict[str, Any]) -> List[Dict[str, Any]]:
     # 4) 孤立类：未被任何关系/属性连接
     connected: Set[str] = set()
     for r in relations:
-        connected.add(r.get("domain", ""))
-        connected.add(r.get("range", ""))
+        for dom_item in iter_types(r.get("domain", "")):
+            connected.add(dom_item)
+        for rng_item in iter_types(r.get("range", "")):
+            connected.add(rng_item)
     for a in attributes:
         connected.add(a.get("owner", ""))
     for c in classes:

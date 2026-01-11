@@ -314,7 +314,7 @@ P4_AUGMENT_PROMPT = """
 
 任务说明：
 
-1. 从文本中识别出当前 TBox 中尚未很好覆盖的「候选类、关系或属性」。
+1. 从文本中识别出当前知识图谱Schema中尚未很好覆盖的「候选类、关系或属性」。
 2. 对每个补充建议，给出：
    - type: "class" | "relation" | "attribute"
    - name: 英文名（类名/关系名/属性名）
@@ -386,10 +386,10 @@ P4_AUGMENT_PROMPT = """
 P5_EXTRACTION_PROMPT = """
 你是一名面向水旱灾害的知识图谱构建助手。
 
-TBox 定义（classes / relations / attributes）：
+知识图谱Schema定义（classes / relations / attributes）：
 {schema_json}
 
-事件 Schema 参考：
+事件结构参考：
 {event_schema}
 
 ---
@@ -413,10 +413,10 @@ TBox 定义（classes / relations / attributes）：
 类使用提示：{class_usage_hint}
 
 1. 识别【待抽取文本】中的 0~N 个灾害事件（如某次洪水或干旱过程），结合前后文完善事件信息，并为每个事件构建一个结构化对象。
-   - event_type 必须使用 TBox.classes.name 中已有的某个类名，例如 "FloodEvent", "DroughtEvent"。
+   - event_type 必须使用知识图谱Schema中已有的某个类名，例如 "FloodEvent", "DroughtEvent"。
    - 若无法确定具体子类，可以使用更上层的类，如 "DisasterEvent"。
 
-2. 针对 TBox 中定义的以下核心关系，请逐一扫描文本，寻找符合条件的实体对：
+2. 针对知识图谱Schema中定义的以下核心关系，请逐一扫描文本，寻找符合条件的实体对：
    (1) has_cause (致灾因子): 寻找 [灾害事件] -> [致灾因子]
    (2) affects_region (影响区域): 寻找 [灾害事件] -> [行政区/流域]
    (3) triggers_response (触发响应): 寻找 [灾害事件/水位] -> [应急响应]
@@ -441,7 +441,7 @@ TBox 定义（classes / relations / attributes）：
 
 3. "events" 中每个元素建议包含字段（可为空字符串或空数组，但字段必须存在）：
    - "event_id": string，例如 "evt_1998_01"
-   - "event_type": string，来自 TBox.classes.name
+   - "event_type": string，来自知识图谱Schema中的类名
    - "name": string，事件中文名称
    - "time": {{
        "start_time": "YYYY-MM-DD" 或 "",
@@ -467,7 +467,7 @@ TBox 定义（classes / relations / attributes）：
 
 4. "triples" 中每个元素必须包含字段：
    - "subject": string
-   - "predicate": string（来自 TBox.relations.name）
+   - "predicate": string（来自知识图谱Schema中的关系名）
    - "object": string
    - "event_id": string 或 ""（若该三元组与某个事件关联，则填写对应 event_id）
    - "evidence": string（从原文复制的支撑句，若不方便可写空字符串）
@@ -522,7 +522,7 @@ TBox 定义（classes / relations / attributes）：
 EVENT_SCHEMA_HINT = """
 {
   "event_id": "evt_年份_序号",
-  "event_type": "TBox 中的类名，如 FloodEvent 或 DroughtEvent",
+  "event_type": "知识图谱Schema中的类名，如 FloodEvent 或 DroughtEvent",
   "name": "事件中文名称",
   "time": {"start_time": "YYYY-MM-DD", "end_time": "YYYY-MM-DD"},
   "space": {
@@ -795,7 +795,7 @@ class P5PromptBuilder:
             类使用提示字符串
         """
         if not classes:
-            return "请根据 TBox 中定义的类进行分类。"
+            return "请根据知识图谱Schema中定义的类进行分类。"
         
         # 筛选事件类
         event_classes = [
@@ -831,12 +831,12 @@ class P5PromptBuilder:
         构建完整的 P5 抽取提示词。
         
         Args:
-            schema_json: TBox 定义 JSON
+            schema_json: 知识图谱Schema 定义 JSON
             input_text: 主文本
             context_before: 前文上下文
             context_after: 后文上下文
             class_usage_hint: 类使用提示
-            event_schema: 事件 Schema 参考
+            event_schema: 事件结构参考
             
         Returns:
             格式化后的提示词
@@ -852,7 +852,7 @@ class P5PromptBuilder:
         return P5_EXTRACTION_PROMPT.format(
             schema_json=schema_json,
             event_schema=event_schema or EVENT_SCHEMA_HINT,
-            class_usage_hint=class_usage_hint or "请根据 TBox 中定义的类进行分类",
+            class_usage_hint=class_usage_hint or "请根据知识图谱Schema中定义的类进行分类",
             input_text=formatted_input,
         )
 
@@ -909,11 +909,11 @@ def build_p5_extraction_prompt(
     封装常用的提示词构建流程，简化调用。
     
     Args:
-        schema_json: TBox 定义 JSON 字符串
+    schema_json: 知识图谱Schema 定义 JSON 字符串
         input_text: 待抽取的主文本
         context_before: 前文上下文
         context_after: 后文上下文
-        classes: TBox 中的类定义列表（用于生成提示）
+    classes: 知识图谱Schema中的类定义列表（用于生成提示）
         
     Returns:
         完整的 P5 提示词
@@ -935,10 +935,10 @@ def build_p5_extraction_prompt(
 P5_COT_EXTRACTION_PROMPT = """
 你是一名水旱灾害知识图谱构建专家。
 
-TBox 定义（classes / relations / attributes）：
+知识图谱Schema定义（classes / relations / attributes）：
 {schema_json}
 
-事件 Schema 参考：
+事件结构参考：
 {event_schema}
 
 ---
@@ -955,7 +955,7 @@ TBox 定义（classes / relations / attributes）：
 【核心约束 - 请务必遵守】
 
 1. **所有抽取的实体必须是原文的子串**，不可改写、推断或编造
-2. 关系必须来自Schema定义的relations列表，不可自创
+2. 关系必须来自知识图谱Schema定义的关系列表，不可自创
 3. 如果文本中找不到相关信息，返回空列表而非编造
 
 ---
@@ -984,7 +984,7 @@ TBox 定义（classes / relations / attributes）：
 
 **规则4：不确定情况的处理**
 - 如果实体类型不确定，优先选择上位类（如用 DisasterEvent 而非具体子类）
-- 如果关系不在 Schema 中，**不要发明新关系**，跳过该三元组
+- 如果关系不在知识图谱Schema中，**不要发明新关系**，跳过该三元组
 - **宁可漏抽，不可错抽**
 
 ---
@@ -1041,7 +1041,7 @@ TBox 定义（classes / relations / attributes）：
 请按照以下步骤进行**逐步推理（Chain of Thought）**：
 
 **Step 1: 实体扫描与定位**
-仔细阅读【待抽取文本】，识别所有可能属于TBox类别的实体（如时间、地点、河流、数值、灾害名等）。
+仔细阅读【待抽取文本】，识别所有可能属于知识图谱Schema类别的实体（如时间、地点、河流、数值、灾害名等）。
 *自我验证*：逐一检查这些实体是否在原文中**原样出现**？如果不是原文子串，请修正为原文表述或丢弃。
 *特别注意*：纯时间（如"1998年"）应标为 TemporalEntity，不是 DisasterEvent
 
@@ -1049,10 +1049,10 @@ TBox 定义（classes / relations / attributes）：
 判断文本是否描述了具体灾害事件，确定事件类型。
 类使用提示：{class_usage_hint}
 
-**Step 3: 关系判断与Schema约束**
-对于识别出的实体对，判断它们之间是否存在TBox定义的关系。
+**Step 3: 关系判断与知识图谱Schema约束**
+对于识别出的实体对，判断它们之间是否存在知识图谱Schema定义的关系。
 检查：
-- 关系predicate是否在TBox.relations.name列表中？
+- 关系predicate是否在知识图谱Schema的关系列表中？
 - 关系的subject和object类型是否符合domain/range约束？
 - *去幻觉*：这条关系在原文中有明确的句子支持吗？如果没有，请丢弃。
 - *特别注意*：纯时间不能作为三元组主语，应使用 occurs_at 连接事件和时间
@@ -1081,7 +1081,7 @@ TBox 定义（classes / relations / attributes）：
   "events": [
     {{
       "event_id": "evt_年份_序号",
-      "event_type": "TBox中的类名（如FloodEvent）",
+      "event_type": "知识图谱Schema中的类名（如FloodEvent）",
       "name": "事件中文名称",
       "time": {{"start_time": "YYYY-MM-DD或空字符串", "end_time": "YYYY-MM-DD或空字符串"}},
       "space": {{
@@ -1102,8 +1102,89 @@ TBox 定义（classes / relations / attributes）：
   "triples": [
     {{
       "subject": "实体名（必须是原文子串）",
-      "predicate": "关系名（必须来自TBox.relations）",
+      "predicate": "关系名（必须来自知识图谱Schema的关系列表）",
       "object": "实体名（必须是原文子串）",
+      "event_id": "关联的事件ID或空字符串",
+      "evidence": "支撑该三元组的原文句子片段"
+    }}
+  ]
+}}
+```
+
+请开始推理：
+"""
+
+
+# ========== P5：图结构增强的链式 CoT 抽取 ==========
+P5_GRAPH_COT_EXTRACTION_PROMPT = """
+你是一名水旱灾害知识图谱构建专家。
+
+【图结构提示】
+{graph_prompt}
+
+知识图谱Schema定义（classes / relations / attributes）：
+{schema_json}
+
+事件结构参考：
+{event_schema}
+
+---
+
+【核心约束 - 请务必遵守】
+
+1. **实体必须是原文子串**，不可改写、推断或编造
+2. 关系必须来自知识图谱Schema的关系列表，不可自创
+3. 找不到证据就丢弃三元组，宁可漏抽不可错抽
+4. {class_usage_hint}
+
+---
+
+【链式推理步骤（图结构驱动）】
+{graph_steps}
+
+---
+
+输入文本:
+{input_text}
+
+---
+
+输出格式要求：
+
+1. 先输出思考过程（以"【思考过程】"开头，50-100字）
+2. 再输出 JSON（以```json开头）
+3. JSON 须包含 "events" 与 "triples" 字段
+
+```json
+{{
+  "events": [
+    {{
+      "event_id": "evt_年份_序号",
+      "event_type": "知识图谱Schema中的类名（如FloodEvent）",
+      "name": "事件中文名称",
+      "time": {{"start_time": "YYYY-MM-DD或空字符串", "end_time": "YYYY-MM-DD或空字符串"}},
+      "space": {{
+        "main_stream": ["主要干流"],
+        "tributaries": ["受影响支流或湖泊"],
+        "provinces": ["主要受灾省份"]
+      }},
+      "causes": ["致灾因子列表"],
+      "impacts": {{
+        "affected_population": "受灾人口（原文表述）",
+        "deaths": "死亡人数（原文表述）",
+        "direct_economic_loss": "直接经济损失（原文表述）"
+      }},
+      "responses": [{{"stage": "应急响应", "measures": ["措施列表"]}}],
+      "source": "数据来源"
+    }}
+  ],
+  "triples": [
+    {{
+      "subject": "实体名（必须是原文子串）",
+      "subject_type": "实体类型（知识图谱Schema类名）",
+      "predicate": "关系名（必须来自知识图谱Schema的关系列表）",
+      "object": "实体名（必须是原文子串）",
+      "object_type": "实体类型（知识图谱Schema类名）",
       "event_id": "关联的事件ID或空字符串",
       "evidence": "支撑该三元组的原文句子片段"
     }}
@@ -1215,12 +1296,12 @@ class P5CotPromptBuilder:
         构建完整的 P5 CoT 抽取提示词。
 
         Args:
-            schema_json: TBox 定义 JSON
+            schema_json: 知识图谱Schema 定义 JSON
             input_text: 主文本
             context_before: 前文上下文
             context_after: 后文上下文
             class_usage_hint: 类使用提示
-            event_schema: 事件 Schema 参考
+            event_schema: 事件结构参考
 
         Returns:
             格式化后的CoT提示词
@@ -1236,7 +1317,7 @@ class P5CotPromptBuilder:
         return P5_COT_EXTRACTION_PROMPT.format(
             schema_json=schema_json,
             event_schema=event_schema or EVENT_SCHEMA_HINT,
-            class_usage_hint=class_usage_hint or "请根据 TBox 中定义的类进行分类",
+            class_usage_hint=class_usage_hint or "请根据知识图谱Schema中定义的类进行分类",
             input_text=formatted_input,
         )
 
@@ -1254,7 +1335,7 @@ class P5CotPromptBuilder:
 
 # ========== 统一抽取 Prompt（Gold 和 Pred 使用相同 Prompt，含 Few-shot + CoT） ==========
 UNIFIED_EXTRACTION_PROMPT = """你是一名水旱灾害领域知识图谱构建专家。
-【Schema 定义】
+【知识图谱Schema定义】
 {schema_text}
 ---
 ## 【⚠️ 核心原则】
@@ -1265,11 +1346,11 @@ UNIFIED_EXTRACTION_PROMPT = """你是一名水旱灾害领域知识图谱构建�
 - ❌ 改写合并："长江中下游地区" ← 原文是"长江中下游"
 - ❌ 推断补充："三峡大坝" ← 原文只有"三峡"
 - ✅ 保持原样：使用原文中完全一致的表述
-### 原则3：关系方向必须符合 Schema
+### 原则3：关系方向必须符合知识图谱Schema
 - 主语类型必须匹配 domain，宾语类型必须匹配 range
 - 如果方向不确定，宁可不抽
 ### 原则4：宁缺毋滥
-- 如果关系不在 Schema 中，**不要发明新关系**
+- 如果关系不在知识图谱Schema中，**不要发明新关系**
 - 如果证据不充分，**不要强行抽取**
 - **宁可漏抽，不可错抽**
 ---
@@ -1481,10 +1562,10 @@ Step 3: 事件识别
 
 是否存在具体的灾害事件？
 事件是否有明确的时间或地点？
-确定事件类型（使用 Schema 中的类型 ID）
+确定事件类型（使用知识图谱Schema中的类型ID）
 Step 4: 关系抽取与方向验证
 
-对于每对实体，判断是否存在 Schema 中定义的关系
+对于每对实体，判断是否存在知识图谱Schema中定义的关系
 关键：检查关系方向是否正确（主语类型匹配 domain，宾语类型匹配 range）
 如果方向不确定，宁可不抽
 Step 5: 证据标注与置信度
@@ -1513,7 +1594,7 @@ Step 5: 证据标注与置信度
   "triples": [
     {{
       "subject": "主语（必须是原文子串）",
-      "predicate": "关系ID（必须来自Schema）",
+      "predicate": "关系ID（必须来自知识图谱Schema）",
       "object": "宾语（必须是原文子串）",
       "evidence": "原文证据句",
       "confidence": "high/medium/low"
@@ -1523,7 +1604,7 @@ Step 5: 证据标注与置信度
 最终检查清单：
 
  所有实体名称都是原文的精确子串
- 所有关系都来自 Schema 定义
+ 所有关系都来自知识图谱Schema定义
  所有关系方向都符合 domain/range 约束
  纯时间实体标记为 TemporalEntity，不是 DisasterEvent
  如果是通用知识描述，返回空列表
@@ -1541,11 +1622,11 @@ UNIFIED_SYSTEM_PROMPT_COT = """你是一名水旱灾害领域知识图谱标注�
 【你的职责】
 1. 从文本中抽取实体和关系三元组，作为模型评测的标准答案
 2. 确保抽取结果的**准确性**和**一致性**
-3. 严格遵循 Schema 约束，不发明新类型或关系
+3. 严格遵循知识图谱Schema约束，不发明新类型或关系
 
 【核心原则】
 1. **准确性优先**：所有实体必须是原文的**精确子串**，不可改写
-2. **Schema 约束**：类型和关系必须来自给定的 Schema
+2. **知识图谱Schema约束**：类型和关系必须来自给定的知识图谱Schema
 3. **方向正确**：关系方向必须符合 domain → range 约束
 4. **证据支撑**：每条三元组必须有原文证据
 5. **宁缺毋滥**：不确定时宁可不抽，不可错抽"""
@@ -1587,7 +1668,7 @@ UNIFIED_USER_PROMPT_COT = """请从以下文本中抽取实体和关系三元组
 - ✅ 保持原样：使用原文中完全一致的表述
 
 ### 规则5：关系方向必须正确
-关系的方向由 Schema 中的 domain（主语类型）和 range（宾语类型）决定：
+关系的方向由知识图谱Schema中的 domain（主语类型）和 range（宾语类型）决定：
 
 | 关系名                | 正确方向                                    | 错误方向                                      |
 | --------------------- | ------------------------------------------- | --------------------------------------------- |
@@ -1740,15 +1821,15 @@ UNIFIED_USER_PROMPT_COT = """请从以下文本中抽取实体和关系三元组
 - 识别所有可能的实体
 - 逐一验证：该实体是否是原文的**精确子串**？
 - 区分时间实体和事件实体（看是否包含灾害词）
-- 确定实体类型（必须来自 Schema）
+- 确定实体类型（必须来自知识图谱Schema）
 
 **Step 3: 事件识别**
 - 是否存在具体的灾害事件？
 - 事件是否有明确的时间或地点？
-- 确定事件类型（使用 Schema 中的类型）
+- 确定事件类型（使用知识图谱Schema中的类型）
 
 **Step 4: 关系抽取与方向验证**
-- 对于每对实体，判断是否存在 Schema 中定义的关系
+- 对于每对实体，判断是否存在知识图谱Schema中定义的关系
 - **关键**：检查关系方向是否正确（主语类型匹配 domain，宾语类型匹配 range）
 - 如果方向不确定，宁可不抽
 
@@ -1777,7 +1858,7 @@ UNIFIED_USER_PROMPT_COT = """请从以下文本中抽取实体和关系三元组
 ```json
 {{{{
   "entities": [
-    {{{{"name": "实体名（必须是原文子串）", "type": "Schema中的类型"}}}}
+    {{{{"name": "实体名（必须是原文子串）", "type": "知识图谱Schema中的类型"}}}}
   ],
   "events": [
     {{{{
@@ -1790,7 +1871,7 @@ UNIFIED_USER_PROMPT_COT = """请从以下文本中抽取实体和关系三元组
   "triples": [
     {{{{
       "subject": "主语（原文子串）",
-      "predicate": "Schema中的关系名",
+      "predicate": "知识图谱Schema中的关系名",
       "object": "宾语（原文子串）",
       "evidence": "原文支撑句",
       "confidence": "high/medium/low"
@@ -1801,8 +1882,8 @@ UNIFIED_USER_PROMPT_COT = """请从以下文本中抽取实体和关系三元组
 
 **最终检查清单**（输出前请自检）：
 - [ ] 所有实体名称都是原文的精确子串
-- [ ] 所有实体类型都来自 Schema
-- [ ] 所有关系都来自 Schema 定义
+- [ ] 所有实体类型都来自知识图谱Schema
+- [ ] 所有关系都来自知识图谱Schema定义
 - [ ] 所有关系方向都符合 domain/range 约束
 - [ ] 纯时间实体标记为 TemporalEntity，不是 DisasterEvent
 - [ ] 如果是通用知识描述，返回空列表
@@ -1811,5 +1892,57 @@ UNIFIED_USER_PROMPT_COT = """请从以下文本中抽取实体和关系三元组
 请开始推理："""
 
 
+# ========== 混合本体构建：语料挖掘与聚类标注 ==========
+HYBRID_VOCAB_MINING_PROMPT = """
+请从以下水旱灾害领域文本中提取关键词汇：
+
+文本：
+{batch_text}
+
+请提取：
+1. 实体词（名词短语）：地名、机构、设施、事件、数值等
+2. 关系词（动词短语）：动作、状态变化、因果关系等
+
+输出 JSON 格式：
+{{"entities": ["词1", "词2"], "relations": ["词1", "词2"]}}
+"""
+
+
+HYBRID_CLUSTER_LABEL_PROMPT = """
+以下是水旱灾害领域的一组相关词汇，请为其生成一个{type_hint}标签。
+
+词汇：{members}
+
+输出 JSON 格式：
+{{"label": "英文标签", "label_cn": "中文标签", "description": "描述"}}
+"""
+
+
+HYBRID_RELATION_LABEL_PROMPT = """
+以下是水旱灾害领域的一组关系词汇，请为其生成一个关系类型标签，并给出 domain / range。
+
+候选实体类型：
+{class_candidates}
+
+关系词汇：{members}
+
+输出 JSON 格式：
+{{
+  "label": "英文标签",
+  "label_cn": "中文标签",
+  "description": "描述",
+  "domain": ["主语类型"],
+  "range": ["宾语类型"]
+}}
+"""
+
+
 # 统一的过滤阈值常量
-UNIFIED_VERIFICATION_THRESHOLD = 0.85
+UNIFIED_VERIFICATION_THRESHOLD = 0.85  # 保留用于向后兼容
+
+# Gold/Pred 差异化过滤配置
+GOLD_VERIFICATION_THRESHOLD = 0.9    # Gold 标注：严格模式，高阈值
+GOLD_STRICT_FILTER = True            # Gold 标注：仅精确匹配
+
+PRED_VERIFICATION_THRESHOLD = 0.75   # Pred 抽取：宽松模式，低阈值
+PRED_STRICT_FILTER = False           # Pred 抽取：允许模糊匹配

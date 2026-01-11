@@ -45,6 +45,11 @@ class SchemaAligner:
         合并两个 TBox，返回 (merged, conflicts)。
         strategy: base_priority / addon_priority / manual
         """
+        def freeze(value):
+            if isinstance(value, (list, tuple, set)):
+                return tuple(value)
+            return value
+
         conflicts: List[dict] = []
         merged = {
             "classes": list(base.get("classes", [])),
@@ -52,7 +57,10 @@ class SchemaAligner:
             "attributes": list(base.get("attributes", [])),
         }
         existing_class_names = {c["name"] for c in merged["classes"] if c.get("name")}
-        existing_rel_keys = {(r["name"], r.get("domain"), r.get("range")) for r in merged["relations"] if r.get("name")}
+        existing_rel_keys = {
+            (r["name"], freeze(r.get("domain")), freeze(r.get("range")))
+            for r in merged["relations"] if r.get("name")
+        }
 
         # 合并类
         for c in addon.get("classes", []):
@@ -69,7 +77,7 @@ class SchemaAligner:
         # 合并关系
         for r in addon.get("relations", []):
             aligned = self.align_relation_name(r.get("name", ""))
-            key = (aligned, r.get("domain"), r.get("range"))
+            key = (aligned, freeze(r.get("domain")), freeze(r.get("range")))
             if key in existing_rel_keys:
                 continue
             merged["relations"].append({**r, "name": aligned})

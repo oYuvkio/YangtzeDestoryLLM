@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# 黄金标注生成脚本（支持 TBox 约束 + 自定义 API 配置）
+# 黄金标注生成脚本（TBox 约束 + 图结构 CoT + 后校验）
 #
 # 支持两种模式：
 #   1. 独立 Schema 模式（默认）：使用预定义的通用 Schema
@@ -13,7 +13,7 @@
 #       --base-url "https://api.openai.com/v1" \
 #       --model "gpt-4o"
 #
-#   # TBox 约束模式（S2 版本）
+#   # TBox 约束模式（S2 版本，图结构 CoT + 后校验）
 #   bash scripts/p5/run_gold_annotation.sh \
 #       --tbox-version s2 \
 #       --model "gpt-4o" \
@@ -80,6 +80,7 @@ USE_COT="1"
 USE_VERIFICATION="1"
 VERIFICATION_THRESHOLD="0.85"
 STRICT_MODE=""
+STRICT_SCHEMA="--strict-schema"
 
 # ==============================================================================
 # 帮助信息
@@ -103,8 +104,10 @@ print_usage() {
     echo "  --no-cot            禁用 CoT"
     echo "  --use-verification  使用幻觉过滤后校验 (默认开启)"
     echo "  --no-verification   禁用后校验"
-    echo "  --verification-threshold T  模糊匹配阈值 (默认: 0.7，Gold 推荐)"
+    echo "  --verification-threshold T  模糊匹配阈值 (默认: 0.85，与 Pred 保持一致)"
     echo "  --strict-mode       严格模式（仅精确匹配，不推荐用于 Gold）"
+    echo "  --strict-schema     严格 Schema 约束（默认开启）"
+    echo "  --no-strict-schema  关闭严格 Schema 约束（仅标记不剔除）"
     echo ""
     echo "运行控制:"
     echo "  --interval SEC      请求间隔秒数 (默认: $DEFAULT_INTERVAL)"
@@ -226,6 +229,14 @@ while [[ $# -gt 0 ]]; do
             STRICT_MODE="--strict-mode"
             shift
             ;;
+        --strict-schema)
+            STRICT_SCHEMA="--strict-schema"
+            shift
+            ;;
+        --no-strict-schema)
+            STRICT_SCHEMA="--no-strict-schema"
+            shift
+            ;;
         -y|--yes)
             NO_CONFIRM="1"
             shift
@@ -339,6 +350,8 @@ if [[ "$MODE" == "tbox" ]]; then
     echo "🔍 幻觉过滤:   $([[ -n "$USE_VERIFICATION" ]] && echo '✅ 开启' || echo '❌ 关闭')"
     [[ -n "$USE_VERIFICATION" ]] && echo "📏 匹配阈值:   $VERIFICATION_THRESHOLD"
     [[ -n "$STRICT_MODE" ]] && echo "⚠️  严格模式:   是"
+    [[ "$STRICT_SCHEMA" == "--no-strict-schema" ]] && echo "⚠️  Schema 严格约束: 否"
+    [[ "$STRICT_SCHEMA" == "--strict-schema" ]] && echo "✅ Schema 严格约束: 是"
 else
     echo "📋 模式:       独立 Schema 模式"
 fi
@@ -390,6 +403,7 @@ if [[ "$MODE" == "tbox" ]]; then
     [[ -n "$USE_VERIFICATION" ]] && CMD="$CMD --use-verification" || CMD="$CMD --no-verification"
     [[ -n "$USE_VERIFICATION" ]] && CMD="$CMD --verification-threshold $VERIFICATION_THRESHOLD"
     [[ -n "$STRICT_MODE" ]] && CMD="$CMD $STRICT_MODE"
+    [[ -n "$STRICT_SCHEMA" ]] && CMD="$CMD $STRICT_SCHEMA"
 
     [[ -n "$TOP_P" ]] && CMD="$CMD --top-p $TOP_P"
     [[ -n "$RESUME" ]] && CMD="$CMD $RESUME"

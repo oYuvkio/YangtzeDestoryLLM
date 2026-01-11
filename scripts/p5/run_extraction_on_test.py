@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime
@@ -31,12 +32,23 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+# 添加项目根目录到 Python 路径，避免直接运行脚本时找不到 kg 包
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from kg.cq_pipeline import (
     CQLLMPipeline,
     TBoxSchema,
     ClassDef,
     RelationDef,
     AttributeDef,
+)
+from kg.extraction_output import build_extraction_record
+from kg.utils.text_source import (
+    load_text_lookup,
+    resolve_doc_id,
+    resolve_source_text,
 )
 
 
@@ -106,8 +118,10 @@ def main() -> None:
     parser.add_argument("--provider", default=None, help="LLM 提供商（覆盖配置）")
     parser.add_argument("--model", default=None, help="模型名称（覆盖配置）")
     parser.add_argument("--base-url", default=None, help="API base URL（覆盖配置）")
+    parser.add_argument("--api-key", default=None, help="API Key（可选，支持逗号分隔多 Key）")
     parser.add_argument("--temperature", type=float, default=None, help="温度参数")
     parser.add_argument("--top-p", type=float, default=None, help="Top-P 参数")
+    parser.add_argument("--timeout", type=int, default=180, help="请求超时时间（秒，默认 180）")
     parser.add_argument(
         "--output", "-o",
         default=None,
@@ -129,15 +143,30 @@ def main() -> None:
     # 后校验开关（默认开启，通过 --no-verify 关闭）
     parser.add_argument("--no-verify", action="store_true",
                         help="禁用原文回溯校验（用于消融实验，默认开启校验）")
+    strict_schema_group = parser.add_mutually_exclusive_group()
+    strict_schema_group.add_argument("--strict-schema", action="store_true", dest="strict_schema",
+                                     default=True, help="严格执行 Schema 约束（默认开启）")
+    strict_schema_group.add_argument("--no-strict-schema", action="store_false", dest="strict_schema",
+                                     help="关闭严格 Schema 约束（仅标记不剔除）")
+    # Pred 宽松模式配置
+    parser.add_argument("--fuzzy-threshold", type=float, default=0.75,
+                        help="Pred 模糊匹配阈值（默认 0.75，宽松模式）")
+    parser.add_argument("--strict-filter", action="store_true", default=False,
+                        help="启用严格过滤（默认关闭，使用宽松模式）")
     # 完整文本来源
     parser.add_argument("--text-source", type=str, default=None,
                         help="完整文本来源文件（如 pool_v3.jsonl），用 id 字段与输入文件的 doc_id 映射")
 
     args = parser.parse_args()
 
+    if args.api_key:
+        os.environ["OPENAI_API_KEYS"] = args.api_key
+        os.environ["OPENAI_API_KEY"] = args.api_key.split(",")[0]
+
     # 逻辑转换：默认都开启，通过 --no-* 关闭
     use_cot = not args.no_cot
     use_verify = not args.no_verify
+    strict_schema = args.strict_schema
     logger = setup_logger()
 
     # 加载配置
@@ -156,6 +185,7 @@ def main() -> None:
     base_url = args.base_url or cfg_llm.get("base_url")
     temperature = args.temperature if args.temperature is not None else cfg_llm.get("temperature", 0.1)
     top_p = args.top_p if args.top_p is not None else cfg_llm.get("top_p")
+    timeout = args.timeout if args.timeout is not None else cfg_llm.get("timeout", 180)
 
     # 输出路径
     if args.output:
@@ -181,22 +211,13 @@ def main() -> None:
     # 加载完整文本映射（如果指定了 --text-source）
     text_lookup = {}
     if args.text_source:
-        text_source_path = Path(args.text_source)
-        if text_source_path.exists():
-            logger.info(f"加载完整文本来源: {args.text_source}")
-            with open(text_source_path, encoding="utf-8") as f:
-                for line in f:
-                    if line.strip():
-                        try:
-                            d = json.loads(line)
-                            doc_id = d.get("id", d.get("doc_id", ""))
-                            if doc_id:
-                                text_lookup[doc_id] = d.get("text", "")
-                        except json.JSONDecodeError:
-                            continue
-            logger.info(f"已加载 {len(text_lookup)} 条完整文本")
-        else:
-            logger.warning(f"文本来源文件不存在: {args.text_source}，将使用输入文件中的文本")
+        logger.info(f"加载完整文本来源: {args.text_source}")
+        try:
+            text_lookup = load_text_lookup(Path(args.text_source))
+        except FileNotFoundError as exc:
+            logger.error(str(exc))
+            return
+        logger.info(f"已加载 {len(text_lookup)} 条完整文本")
 
     # 加载 TBox
     tbox_path = Path(args.tbox)
@@ -212,6 +233,8 @@ def main() -> None:
         "provider": provider,
         "model_name": model_name,
         "temperature": temperature,
+        "timeout": timeout,
+        "no_retry": True,
     }
     if top_p is not None:
         llm_config["top_p"] = top_p
@@ -219,14 +242,16 @@ def main() -> None:
         llm_config["base_url"] = base_url
 
     logger.info(
-        "LLM 配置: provider=%s, model=%s, temperature=%s, top_p=%s, use_cot=%s, use_verify=%s",
+        "LLM 配置: provider=%s, model=%s, temperature=%s, top_p=%s, timeout=%ss, use_cot=%s, use_verify=%s",
         provider,
         model_name,
         temperature,
         top_p,
+        timeout,
         use_cot,
         use_verify,
     )
+    logger.info("Schema 严格约束: %s", "开启" if strict_schema else "关闭")
 
     pipeline = CQLLMPipeline(
         llm_config=llm_config,
@@ -285,23 +310,31 @@ def main() -> None:
             logger.info("保留正常记录: %d 条（准备重跑 error 记录）", preserved_count)
 
         for idx, sample in enumerate(samples, start=1):
-            doc_id = sample.get("doc_id", f"sample_{idx}")
-
-            # 获取文本（优先从 text_lookup 获取完整文本）
-            if text_lookup and doc_id in text_lookup:
-                source_text = text_lookup[doc_id]
-            else:
-                source_text = sample.get("source_text", "")
+            doc_id = resolve_doc_id(sample, idx)
+            source_text, source_tag = resolve_source_text(
+                sample,
+                doc_id,
+                text_lookup,
+                require_text_source=bool(args.text_source),
+            )
 
             if not source_text:
-                logger.warning(f"[{idx}/{len(samples)}] {doc_id}: 无 source_text，跳过")
-                error_result = {
-                    "doc_id": doc_id,
-                    "events": [],
-                    "triples": [],
-                    "error": "empty_source_text",
-                }
-                out_f.write(json.dumps(error_result, ensure_ascii=False) + "\n")
+                error_reason = (
+                    "missing_text_source"
+                    if source_tag == "missing_text_source"
+                    else "empty_source_text"
+                )
+                logger.warning(f"[{idx}/{len(samples)}] {doc_id}: 无有效文本({source_tag})，跳过")
+                error_record = build_extraction_record(
+                    doc_id=doc_id,
+                    source_text="",
+                    extraction_result=None,
+                    use_cot=use_cot,
+                    use_verify=use_verify,
+                    include_source_text=False,
+                    error=error_reason,
+                )
+                out_f.write(json.dumps(error_record, ensure_ascii=False) + "\n")
                 out_f.flush()
                 error_count += 1
                 continue
@@ -324,48 +357,10 @@ def main() -> None:
                         save_path=None,
                         favor_existing_classes=args.favor_existing,
                         use_cot=use_cot,
-                        strict_filter=True,
-                        # 使用统一阈值（默认 0.85，与 Gold 保持一致）
+                        strict_filter=args.strict_filter,
+                        fuzzy_threshold=args.fuzzy_threshold,
+                        strict_schema=strict_schema,
                     )
-
-                    filtered_triples = res.get("filtered_triples", []) or []
-                    filtered_with_reason = [
-                        {
-                            "triple": {k: v for k, v in t.items() if k != "filter_reason"},
-                            "reason": t.get("filter_reason", ""),
-                        }
-                        for t in filtered_triples
-                    ]
-                    stats = res.get("stats", {}) if isinstance(res.get("stats"), dict) else {}
-                    total_triples = stats.get(
-                        "total_triples",
-                        len(res.get("triples", [])) + len(filtered_triples),
-                    )
-                    valid_triples = stats.get("valid_triples", len(res.get("triples", [])))
-                    filtered_count = stats.get("filtered_triples", len(filtered_triples))
-                    rate = res.get("hallucination_rate", 0.0)
-
-                    # 记录幻觉过滤元数据，方便后续案例分析
-                    res["_meta_hallucination"] = {
-                        "is_filtered": True,
-                        "original_count": total_triples,
-                        "valid_count": valid_triples,
-                        "filtered_count": filtered_count,
-                        "rate": rate,
-                        "filtered_triples": filtered_with_reason,
-                    }
-
-                    event_count = len(res.get("events", []))
-                    if filtered_count > 0:
-                        logger.info(
-                            f"[{idx}/{len(samples)}] {doc_id}: 事件 {event_count}, "
-                            f"三元组 {total_triples} → {valid_triples} (幻觉率: {rate:.1%})"
-                        )
-                    else:
-                        logger.info(
-                            f"[{idx}/{len(samples)}] {doc_id}: 事件 {event_count}, "
-                            f"三元组 {valid_triples} (无幻觉)"
-                        )
                 else:
                     res = pipeline.extract_events(
                         source_text,
@@ -374,29 +369,63 @@ def main() -> None:
                         favor_existing_classes=args.favor_existing,
                         use_cot=use_cot,
                     )
-                    # 不校验时也记录状态
-                    res["_meta_hallucination"] = {"is_filtered": False}
-                    event_count = len(res.get("events", []))
-                    triple_count = len(res.get("triples", []))
-                    logger.info(f"[{idx}/{len(samples)}] {doc_id}: 事件 {event_count}, 三元组 {triple_count} [Raw]")
 
-                res["doc_id"] = doc_id
-                res["use_cot"] = use_cot  # 记录是否使用 CoT
-                res["use_verify"] = use_verify  # 记录是否使用后校验
+                output_record = build_extraction_record(
+                    doc_id=doc_id,
+                    source_text=source_text,
+                    extraction_result=res,
+                    use_cot=use_cot,
+                    use_verify=use_verify,
+                    include_source_text=False,
+                )
 
-                out_f.write(json.dumps(res, ensure_ascii=False) + "\n")
+                if output_record.get("error"):
+                    error_count += 1
+                    logger.error(
+                        f"[{idx}/{len(samples)}] {doc_id}: error={output_record.get('error')}"
+                    )
+                    out_f.write(json.dumps(output_record, ensure_ascii=False) + "\n")
+                    out_f.flush()
+                    continue
+
+                hallucination = output_record.get("hallucination", {})
+                event_count = len(output_record.get("events", []))
+                triple_count = len(output_record.get("triples", []))
+                filtered_count = hallucination.get("filtered_count", 0)
+                rate = hallucination.get("rate", 0.0)
+                if use_verify:
+                    if filtered_count > 0:
+                        logger.info(
+                            f"[{idx}/{len(samples)}] {doc_id}: 事件 {event_count}, "
+                            f"三元组 {triple_count} (幻觉率: {rate:.1%})"
+                        )
+                    else:
+                        logger.info(
+                            f"[{idx}/{len(samples)}] {doc_id}: 事件 {event_count}, "
+                            f"三元组 {triple_count} (无幻觉)"
+                        )
+                else:
+                    logger.info(
+                        f"[{idx}/{len(samples)}] {doc_id}: 事件 {event_count}, "
+                        f"三元组 {triple_count} [Raw]"
+                    )
+
+                out_f.write(json.dumps(output_record, ensure_ascii=False) + "\n")
                 out_f.flush()
                 success_count += 1
 
             except Exception as e:
                 error_msg = str(e)
-                error_result = {
-                    "doc_id": doc_id,
-                    "events": [],
-                    "triples": [],
-                    "error": error_msg,
-                }
-                out_f.write(json.dumps(error_result, ensure_ascii=False) + "\n")
+                error_record = build_extraction_record(
+                    doc_id=doc_id,
+                    source_text=source_text,
+                    extraction_result=None,
+                    use_cot=use_cot,
+                    use_verify=use_verify,
+                    include_source_text=False,
+                    error=error_msg,
+                )
+                out_f.write(json.dumps(error_record, ensure_ascii=False) + "\n")
                 out_f.flush()
                 error_count += 1
                 logger.error(f"[{idx}/{len(samples)}] {doc_id}: {error_msg}")
@@ -423,6 +452,7 @@ def main() -> None:
         "quota_exhausted": quota_exhausted,
         "use_cot": use_cot,
         "use_verify": use_verify,
+        "strict_schema": strict_schema,
         "retry_errors": args.retry_errors,
         "output": str(output_path),
     }

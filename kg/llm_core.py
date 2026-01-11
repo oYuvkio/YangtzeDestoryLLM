@@ -488,6 +488,10 @@ class LLMClient:
         self.base_url = base_url
         self.temperature = config.get("temperature", 0.1)
         self.max_retries = config.get("max_retries", 3)
+        self.no_retry = bool(
+            config.get("no_retry")
+            or str(os.getenv("LLM_NO_RETRY", "")).lower() in {"1", "true", "yes", "on"}
+        )
         self.top_p = config.get("top_p")
         self.timeout = config.get("timeout", 60)
         
@@ -733,7 +737,8 @@ class LLMClient:
             """在 shell 单引号字符串中安全转义单引号。"""
             return (text or "").replace("'", "'\"'\"'")
         
-        for attempt in range(self.max_retries):
+        attempts_total = 1 if self.no_retry else self.max_retries
+        for attempt in range(attempts_total):
             try:
                 # ===== 构建请求参数 =====
                 params = {
@@ -775,7 +780,7 @@ class LLMClient:
                         "json_mode=%s response_format=%s thinking=%s timeout=%ss "
                         "temperature=%s max_tokens=%s messages=%s total_chars=%s\n%s",
                         attempt + 1,
-                        self.max_retries,
+                        attempts_total,
                         self.provider,
                         self.model,
                         self.base_url,
@@ -819,7 +824,7 @@ class LLMClient:
                     logger.info(
                         "[LLM][RESP] attempt=%s/%s elapsed=%.2fs content_len=%s preview=%s",
                         attempt + 1,
-                        self.max_retries,
+                        attempts_total,
                         elapsed,
                         len(content),
                         truncate_for_log(content, max_chars=600),
@@ -841,6 +846,8 @@ class LLMClient:
                     flush_log_handlers()
                 if "response_format" in err_str or "unexpected keyword argument" in err_str:
                     if use_response_format:
+                        if self.no_retry:
+                            raise
                         logger.warning(
                             f"API 不支持 response_format 参数，已禁用并重试 "
                             f"(provider={self._provider_name or 'unknown'})"
@@ -887,6 +894,8 @@ class LLMClient:
                 
                 # ===== 429 限流：尝试切换 Key =====
                 if "429" in err_lower or "rate limit" in err_lower:
+                    if self.no_retry:
+                        raise RateLimitError(str(e))
                     # 标记当前 Key 为限流，尝试切换到下一个
                     if self._switch_to_next_key():
                         # 成功切换到新 Key，立即重试（不算作重试次数）
@@ -904,6 +913,8 @@ class LLMClient:
                 
                 # ===== 5xx 服务不可用：等待 60s 后重试 =====
                 if any(code in err_lower for code in ["500", "502", "503", "504"]):
+                    if self.no_retry:
+                        raise ServiceUnavailableError(str(e))
                     if attempt < self.max_retries - 1:
                         logger.warning(
                             f"⏳ API 服务不可用 (5xx)，等待 60s 后重试 "
@@ -915,6 +926,8 @@ class LLMClient:
                     raise ServiceUnavailableError(str(e))
 
                 # ===== 其他错误：等待 60s 后重试 =====
+                if self.no_retry:
+                    raise
                 if attempt < self.max_retries - 1:
                     logger.warning(
                         f"⚠️ LLM 调用失败，等待 60s 后重试 ({attempt + 1}/{self.max_retries}): {err_msg[:200]}"

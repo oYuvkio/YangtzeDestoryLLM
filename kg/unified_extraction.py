@@ -49,13 +49,22 @@ class DirectionNormalizer:
         self.tbox = tbox
         self.relation_signatures = self._build_signatures()
 
-    def _build_signatures(self) -> Dict[str, Tuple[str, str]]:
-        """构建关系签名映射：relation_name -> (domain, range)"""
+    @staticmethod
+    def _normalize_types(value: Any) -> List[str]:
+        if isinstance(value, (list, tuple, set)):
+            return [str(v).strip().lower() for v in value if str(v).strip()]
+        if value is None:
+            return []
+        text = str(value).strip()
+        return [text.lower()] if text else []
+
+    def _build_signatures(self) -> Dict[str, Tuple[List[str], List[str]]]:
+        """构建关系签名映射：relation_name -> (domain_list, range_list)"""
         signatures = {}
         for rel in self.tbox.get("relations", []):
             name = rel.get("name", "").lower()
-            domain = rel.get("domain", "").lower()
-            range_ = rel.get("range", "").lower()
+            domain = self._normalize_types(rel.get("domain"))
+            range_ = self._normalize_types(rel.get("range"))
             if name:
                 signatures[name] = (domain, range_)
         return signatures
@@ -109,7 +118,7 @@ class DirectionNormalizer:
             need_swap = False
             if subject_type and object_type:
                 # 如果主语类型匹配 range 且宾语类型匹配 domain，则需要交换
-                if subject_type == expected_range and object_type == expected_domain:
+                if subject_type in expected_range and object_type in expected_domain:
                     need_swap = True
 
             if need_swap:

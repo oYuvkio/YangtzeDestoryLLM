@@ -53,6 +53,7 @@ INTERVAL=3
 LIMIT_COUNT=""
 NO_COT=false
 NO_VERIFY=false
+NO_STRICT_SCHEMA=false
 RETRY_ERRORS=false
 TBOX="outputs/cq_pipeline/final/tbox_s2_optimized.json"
 TEST_FILE="data/p5_eval_pool/final/test_final.jsonl"
@@ -97,6 +98,10 @@ while [[ $# -gt 0 ]]; do
             NO_VERIFY=true
             shift
             ;;
+        --no-strict-schema)
+            NO_STRICT_SCHEMA=true
+            shift
+            ;;
         --retry-errors)
             RETRY_ERRORS=true
             shift
@@ -139,6 +144,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --limit       最多处理的样本数"
             echo "  --no-cot      禁用 CoT（用于消融实验）"
             echo "  --no-verify   禁用后校验（用于消融实验）"
+            echo "  --no-strict-schema  关闭严格 Schema 约束"
             echo "  --retry-errors 重新跑 error 记录（跳过正常记录）"
             echo "  --relation-mapping 关系映射配置文件路径（启用映射评测）"
             echo "  --pred-file   指定已有的预测文件（跳过抽取步骤，直接评估）"
@@ -230,6 +236,7 @@ echo ""
 FLAGS=""
 [ "$NO_COT" = true ] && FLAGS="$FLAGS --no-cot"
 [ "$NO_VERIFY" = true ] && FLAGS="$FLAGS --no-verify"
+[ "$NO_STRICT_SCHEMA" = true ] && FLAGS="$FLAGS --no-strict-schema"
 [ "$RETRY_ERRORS" = true ] && FLAGS="$FLAGS --retry-errors"
 [ -n "$BASE_URL" ] && FLAGS="$FLAGS --base-url $BASE_URL"
 [ -n "$TEXT_SOURCE" ] && FLAGS="$FLAGS --text-source $TEXT_SOURCE"
