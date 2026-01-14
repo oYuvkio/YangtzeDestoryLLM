@@ -36,7 +36,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Set, Tuple
+from typing import Dict, Any, List, Optional, Set, Tuple, Union
 
 
 # ============================================================================
@@ -317,21 +317,37 @@ def infer_entity_type(
 
 def type_matches_constraint(
     inferred_type: Optional[str],
-    constraint_type: str,
+    constraint_type: Union[str, List[str]],
     class_hierarchy: Dict[str, Set[str]]
 ) -> bool:
     """
     检查推断的类型是否匹配约束类型（考虑继承关系）
+
+    Args:
+        inferred_type: 推断的实体类型
+        constraint_type: 约束类型，可以是单个字符串或字符串列表
+        class_hierarchy: 类层次结构
     """
     if not inferred_type or not constraint_type:
         return True  # 无法判断，默认匹配
 
-    # 检查是否是约束类型或其子类
-    if inferred_type in class_hierarchy:
-        return constraint_type in class_hierarchy[inferred_type]
+    # 将 constraint_type 统一为列表
+    if isinstance(constraint_type, str):
+        constraint_types = [constraint_type]
+    else:
+        constraint_types = constraint_type
 
-    # 简单字符串匹配
-    return inferred_type.lower() == constraint_type.lower()
+    # 检查是否匹配任一约束类型
+    for ct in constraint_types:
+        # 检查是否是约束类型或其子类
+        if inferred_type in class_hierarchy:
+            if ct in class_hierarchy[inferred_type]:
+                return True
+        # 简单字符串匹配
+        if inferred_type.lower() == ct.lower():
+            return True
+
+    return False
 
 
 def normalize_triple(

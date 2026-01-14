@@ -19,6 +19,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from dotenv import load_dotenv
+
+# 加载 .env 文件
+load_dotenv()
+
 # 添加项目根目录到 Python 路径
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -26,6 +31,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from kg.cq_pipeline import CQLLMPipeline, TBoxSchema, ClassDef, RelationDef, AttributeDef
 from kg.extraction_output import build_extraction_record
+from kg.llm_core import (
+    RateLimitError,
+    AllKeysExhaustedError,
+    get_key_manager,
+)
 from kg.utils.text_source import (
     load_text_lookup,
     resolve_doc_id,
@@ -57,13 +67,31 @@ def create_pipeline(args: argparse.Namespace) -> CQLLMPipeline:
         "temperature": args.temperature,
         "max_retries": args.max_retries,
         "timeout": 180,
-        "no_retry": True,
+        # 不设置 no_retry，允许 LLMClient 内部处理 429 并自动切换 Key
     }
     if args.top_p is not None:
         llm_config["top_p"] = args.top_p
 
+    # API Key 加载逻辑：
+    # 1. 指定了 --api-key 则直接使用
+    # 2. 未指定则从 .env 加载：优先 OPENAI_API_KEYS（多 key 轮换），回退到 OPENAI_API_KEY
     if args.api_key:
         os.environ["OPENAI_API_KEYS"] = args.api_key
+        os.environ["OPENAI_API_KEY"] = args.api_key.split(",")[0]
+        key_count = len(args.api_key.split(","))
+        log(f"🔑 使用命令行指定的 API Key（{key_count} 个，支持 429 自动切换）")
+    else:
+        # 从 .env 加载（load_dotenv 已在模块顶部调用）
+        api_keys = os.environ.get("OPENAI_API_KEYS", "")
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        if api_keys:
+            key_count = len(api_keys.split(","))
+            log(f"🔑 使用 .env 中的 OPENAI_API_KEYS（{key_count} 个 key，支持 429 自动切换）")
+        elif api_key:
+            os.environ["OPENAI_API_KEYS"] = api_key
+            log(f"🔑 使用 .env 中的 OPENAI_API_KEY（单 key，无法切换）")
+        else:
+            log("⚠️  未找到 API Key，请设置 OPENAI_API_KEYS 或 OPENAI_API_KEY 环境变量")
 
     return CQLLMPipeline(llm_config=llm_config, output_dir=str(args.output_dir))
 
@@ -172,6 +200,10 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=0.5, help="请求间隔（秒）")
     parser.add_argument("--text-source", type=str, default=None,
                         help="完整文本来源文件（doc_id 映射 id 字段）")
+    parser.add_argument("--rate-limit-retries", type=int, default=5,
+                        help="429/配额耗尽时的最大重试次数（默认 5）")
+    parser.add_argument("--rate-limit-wait", type=int, default=60,
+                        help="429 限流时的等待时间（秒，默认 60）")
 
     args = parser.parse_args()
 
@@ -316,43 +348,93 @@ def main() -> None:
 
             log(f"[{idx+1}/{len(samples)}] {doc_id[:30]}...")
 
-            try:
-                extraction = generate_gold_for_sample(
-                    text=text,
-                    pipeline=pipeline,
-                    tbox=tbox,
-                    use_cot=use_cot,
-                    use_verification=use_verification,
-                    strict_filter=args.strict_mode,
-                    fuzzy_threshold=args.verification_threshold,
-                    strict_schema=args.strict_schema,
-                    favor_existing_classes=args.favor_existing,
-                )
-                result = build_extraction_record(
-                    doc_id=doc_id,
-                    source_text=text,
-                    extraction_result=extraction,
-                    use_cot=use_cot,
-                    use_verify=use_verification,
-                    include_source_text=False,
-                )
-            except Exception as e:
-                result = build_extraction_record(
-                    doc_id=doc_id,
-                    source_text=text,
-                    extraction_result=None,
-                    use_cot=use_cot,
-                    use_verify=use_verification,
-                    include_source_text=False,
-                    error=str(e),
-                )
+            # 429/配额耗尽自动重试逻辑
+            max_rate_limit_retries = args.rate_limit_retries
+            base_wait_time = args.rate_limit_wait
+            rate_limit_retry_count = 0
+            result = None
+
+            while rate_limit_retry_count < max_rate_limit_retries:
+                try:
+                    extraction = generate_gold_for_sample(
+                        text=text,
+                        pipeline=pipeline,
+                        tbox=tbox,
+                        use_cot=use_cot,
+                        use_verification=use_verification,
+                        strict_filter=args.strict_mode,
+                        fuzzy_threshold=args.verification_threshold,
+                        strict_schema=args.strict_schema,
+                        favor_existing_classes=args.favor_existing,
+                    )
+                    result = build_extraction_record(
+                        doc_id=doc_id,
+                        source_text=text,
+                        extraction_result=extraction,
+                        use_cot=use_cot,
+                        use_verify=use_verification,
+                        include_source_text=False,
+                    )
+                    break  # 成功，退出重试循环
+
+                except (RateLimitError, AllKeysExhaustedError) as e:
+                    rate_limit_retry_count += 1
+                    err_msg = str(e)
+
+                    # 检查是否是配额耗尽（quota exceeded）
+                    is_quota_exhausted = "quota" in err_msg.lower() or "exceeded" in err_msg.lower()
+
+                    if rate_limit_retry_count >= max_rate_limit_retries:
+                        log(f"⚠️  达到最大重试次数 ({max_rate_limit_retries})，跳过此样本")
+                        result = build_extraction_record(
+                            doc_id=doc_id,
+                            source_text=text,
+                            extraction_result=None,
+                            use_cot=use_cot,
+                            use_verify=use_verification,
+                            include_source_text=False,
+                            error=f"rate_limit_exhausted: {err_msg[:100]}",
+                        )
+                        break
+
+                    # 计算等待时间：429 使用配置值，配额耗尽等待更长时间
+                    if is_quota_exhausted:
+                        wait_time = base_wait_time * 2  # 配额耗尽等待双倍时间
+                        log(f"⚠️  配额耗尽，等待 {wait_time}s 后重试 ({rate_limit_retry_count}/{max_rate_limit_retries})...")
+                    else:
+                        wait_time = base_wait_time
+                        log(f"⚠️  触发限流 (429)，等待 {wait_time}s 后重试 ({rate_limit_retry_count}/{max_rate_limit_retries})...")
+
+                    # 显示 Key 状态
+                    try:
+                        key_manager = get_key_manager()
+                        status = key_manager.get_status()
+                        available = sum(1 for k in status["keys"] if k["is_available"])
+                        log(f"   🔑 Key 状态: {available}/{status['total_keys']} 可用")
+                    except Exception:
+                        pass
+
+                    time.sleep(wait_time)
+
+                except Exception as e:
+                    # 其他异常直接记录错误
+                    result = build_extraction_record(
+                        doc_id=doc_id,
+                        source_text=text,
+                        extraction_result=None,
+                        use_cot=use_cot,
+                        use_verify=use_verification,
+                        include_source_text=False,
+                        error=str(e),
+                    )
+                    break
 
             f_out.write(json.dumps(result, ensure_ascii=False) + "\n")
             f_out.flush()
 
             if result.get("error"):
                 errors += 1
-                err_msg = result.get("error", "未知错误")[:30]
+                err_msg = result.get("error", "未知错误")[:50]
                 log(f"❌ {err_msg}")
             else:
                 success += 1

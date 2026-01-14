@@ -188,12 +188,17 @@ if [ ! -f "$TBOX" ]; then
 fi
 
 # 构建输出目录
-# 如果指定了 --pred-file，则输出目录为 pred 文件所在目录
+# 优先使用 --output-base，否则使用 pred 文件所在目录
 if [ -n "$USER_PRED_FILE" ]; then
-    OUT_DIR=$(dirname "$USER_PRED_FILE")
     # 从 pred 文件推断模型名（如果没有指定 --model）
     if [ -z "$MODEL" ]; then
-        MODEL=$(basename "$OUT_DIR")
+        MODEL=$(basename "$(dirname "$USER_PRED_FILE")")
+    fi
+    # 如果用户指定了 --output-base，使用它；否则使用 pred 文件所在目录
+    if [ "$OUTPUT_BASE" != "outputs/eval_models" ]; then
+        OUT_DIR="$OUTPUT_BASE"
+    else
+        OUT_DIR=$(dirname "$USER_PRED_FILE")
     fi
 else
     MODEL_DIR="${MODEL//\//_}"  # 替换 / 为 _
@@ -391,16 +396,34 @@ python scripts/p5/normalize_triple_direction.py \
 GOLD_FOR_METRICS="$GOLD_NORMALIZED"
 PRED_FOR_METRICS="$PRED_NORMALIZED"
 
-# Step 3: 评测
+# Step 3: 评测（不做归一化的原始指标）
 echo ""
-echo "[Step 3] 计算指标..."
+echo "[Step 3] 计算原始指标（不做归一化）..."
+METRICS_NO_NORM_FILE="$OUT_DIR/metrics_no_normalize.json"
+METRICS_NO_NORM_RAW_FILE="$OUT_DIR/metrics_no_normalize_raw.json"
+python tools/abox_metrics.py \
+    --gold "$GOLD_FILTERED" \
+    --pred "$PRED_FILTERED" \
+    --tbox "$TBOX" \
+    --out "$METRICS_NO_NORM_FILE"
+
+python tools/abox_metrics.py \
+    --gold "$GOLD_FILTERED" \
+    --pred "$PRED_FILTERED" \
+    --tbox "$TBOX" \
+    --use-original-type \
+    --out "$METRICS_NO_NORM_RAW_FILE"
+
+# Step 4: 评测（归一化后的指标）
+echo ""
+echo "[Step 4] 计算归一化后指标..."
 python tools/abox_metrics.py \
     --gold "$GOLD_FOR_METRICS" \
     --pred "$PRED_FOR_METRICS" \
     --tbox "$TBOX" \
     --out "$METRICS_FILE"
 
-# Step 3.1: 原始类型评测（忽略回退逻辑）
+# Step 4.1: 原始类型评测（忽略回退逻辑）
 python tools/abox_metrics.py \
     --gold "$GOLD_FOR_METRICS" \
     --pred "$PRED_FOR_METRICS" \
@@ -408,9 +431,9 @@ python tools/abox_metrics.py \
     --use-original-type \
     --out "$METRICS_RAW_FILE"
 
-# Step 3.2: 诊断报告
+# Step 4.2: 诊断报告
 echo ""
-echo "[Step 3.2] 生成诊断报告..."
+echo "[Step 4.2] 生成诊断报告..."
 DIAGNOSIS_FILE="$OUT_DIR/diagnosis_report.json"
 python scripts/p5/diagnose_extraction.py \
     --gold "$GOLD_FOR_METRICS" \
@@ -487,6 +510,28 @@ if 'raw' in data and 'tbox_filtered' in data:
         print(f'    Recall:         {tr.get(\"recall\", 0):.4f}')
         print(f'    F1:             {tr.get(\"f1\", 0):.4f}')
 
+        # 实体指标（仅名称匹配）
+        ent = m.get('entity_metrics', {})
+        print(f'  [Entity (name only)]')
+        print(f'    Precision:      {ent.get(\"precision\", 0):.4f}')
+        print(f'    Recall:         {ent.get(\"recall\", 0):.4f}')
+        print(f'    F1:             {ent.get(\"f1\", 0):.4f}')
+
+        # 实体指标（名称+类型匹配）
+        ent_type = m.get('entity_metrics_with_type', {})
+        if ent_type:
+            print(f'  [Entity (name+type)]')
+            print(f'    Precision:      {ent_type.get(\"precision\", 0):.4f}')
+            print(f'    Recall:         {ent_type.get(\"recall\", 0):.4f}')
+            print(f'    F1:             {ent_type.get(\"f1\", 0):.4f}')
+
+        # 关系指标
+        rel = m.get('relation_metrics', {})
+        print(f'  [Relation]')
+        print(f'    Precision:      {rel.get(\"precision\", 0):.4f}')
+        print(f'    Recall:         {rel.get(\"recall\", 0):.4f}')
+        print(f'    F1:             {rel.get(\"f1\", 0):.4f}')
+
         # 核心质量指标
         print(f'  [Quality]')
         print(f'    TBox Consistency:   {m.get(\"tbox_consistency\", 0):.4f}')
@@ -513,6 +558,28 @@ else:
     print(f'    Precision:      {tr.get(\"precision\", 0):.4f}')
     print(f'    Recall:         {tr.get(\"recall\", 0):.4f}')
     print(f'    F1:             {tr.get(\"f1\", 0):.4f}')
+
+    # 实体指标（仅名称匹配）
+    ent = m.get('entity_metrics', {})
+    print(f'  [Entity (name only)]')
+    print(f'    Precision:      {ent.get(\"precision\", 0):.4f}')
+    print(f'    Recall:         {ent.get(\"recall\", 0):.4f}')
+    print(f'    F1:             {ent.get(\"f1\", 0):.4f}')
+
+    # 实体指标（名称+类型匹配）
+    ent_type = m.get('entity_metrics_with_type', {})
+    if ent_type:
+        print(f'  [Entity (name+type)]')
+        print(f'    Precision:      {ent_type.get(\"precision\", 0):.4f}')
+        print(f'    Recall:         {ent_type.get(\"recall\", 0):.4f}')
+        print(f'    F1:             {ent_type.get(\"f1\", 0):.4f}')
+
+    # 关系指标
+    rel = m.get('relation_metrics', {})
+    print(f'  [Relation]')
+    print(f'    Precision:      {rel.get(\"precision\", 0):.4f}')
+    print(f'    Recall:         {rel.get(\"recall\", 0):.4f}')
+    print(f'    F1:             {rel.get(\"f1\", 0):.4f}')
 
     print(f'  [Quality]')
     print(f'    TBox Consistency:   {m.get(\"tbox_consistency\", 0):.4f}')
@@ -554,6 +621,28 @@ if 'raw' in data and 'tbox_filtered' in data:
         print(f'    Recall:         {tr.get(\"recall\", 0):.4f}')
         print(f'    F1:             {tr.get(\"f1\", 0):.4f}')
 
+        # 实体指标（仅名称匹配）
+        ent = m.get('entity_metrics', {})
+        print(f'  [Entity (name only)]')
+        print(f'    Precision:      {ent.get(\"precision\", 0):.4f}')
+        print(f'    Recall:         {ent.get(\"recall\", 0):.4f}')
+        print(f'    F1:             {ent.get(\"f1\", 0):.4f}')
+
+        # 实体指标（名称+类型匹配）
+        ent_type = m.get('entity_metrics_with_type', {})
+        if ent_type:
+            print(f'  [Entity (name+type)]')
+            print(f'    Precision:      {ent_type.get(\"precision\", 0):.4f}')
+            print(f'    Recall:         {ent_type.get(\"recall\", 0):.4f}')
+            print(f'    F1:             {ent_type.get(\"f1\", 0):.4f}')
+
+        # 关系指标
+        rel = m.get('relation_metrics', {})
+        print(f'  [Relation]')
+        print(f'    Precision:      {rel.get(\"precision\", 0):.4f}')
+        print(f'    Recall:         {rel.get(\"recall\", 0):.4f}')
+        print(f'    F1:             {rel.get(\"f1\", 0):.4f}')
+
         print(f'  [Quality]')
         print(f'    TBox Consistency:   {m.get(\"tbox_consistency\", 0):.4f}')
         hr = m.get('hallucination_rate')
@@ -579,6 +668,28 @@ else:
     print(f'    Recall:         {tr.get(\"recall\", 0):.4f}')
     print(f'    F1:             {tr.get(\"f1\", 0):.4f}')
 
+    # 实体指标（仅名称匹配）
+    ent = m.get('entity_metrics', {})
+    print(f'  [Entity (name only)]')
+    print(f'    Precision:      {ent.get(\"precision\", 0):.4f}')
+    print(f'    Recall:         {ent.get(\"recall\", 0):.4f}')
+    print(f'    F1:             {ent.get(\"f1\", 0):.4f}')
+
+    # 实体指标（名称+类型匹配）
+    ent_type = m.get('entity_metrics_with_type', {})
+    if ent_type:
+        print(f'  [Entity (name+type)]')
+        print(f'    Precision:      {ent_type.get(\"precision\", 0):.4f}')
+        print(f'    Recall:         {ent_type.get(\"recall\", 0):.4f}')
+        print(f'    F1:             {ent_type.get(\"f1\", 0):.4f}')
+
+    # 关系指标
+    rel = m.get('relation_metrics', {})
+    print(f'  [Relation]')
+    print(f'    Precision:      {rel.get(\"precision\", 0):.4f}')
+    print(f'    Recall:         {rel.get(\"recall\", 0):.4f}')
+    print(f'    F1:             {rel.get(\"f1\", 0):.4f}')
+
     print(f'  [Quality]')
     print(f'    TBox Consistency:   {m.get(\"tbox_consistency\", 0):.4f}')
     print(f'    Hallucination Rate: {m.get(\"hallucination_rate\", 0):.4f}')
@@ -590,5 +701,11 @@ echo ""
 echo "【输出文件】"
 echo "  预测结果:     $PRED_FILE"
 echo "  对齐结果:     $ALIGNED_FILE"
+echo ""
+echo "  --- 不做归一化 ---"
+echo "  指标(回退):   $METRICS_NO_NORM_FILE"
+echo "  指标(原始):   $METRICS_NO_NORM_RAW_FILE"
+echo ""
+echo "  --- 归一化后 ---"
 echo "  指标(回退):   $METRICS_FILE"
 echo "  指标(原始):   $METRICS_RAW_FILE"

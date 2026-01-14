@@ -5,8 +5,11 @@
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,51 +41,137 @@ class GraphStructure:
     paths: List[PathPattern]
     detection_keywords: Dict[str, List[str]] = field(default_factory=dict)
 
+    # ========== 便捷属性 ==========
+
+    @property
+    def start_types(self) -> List[str]:
+        """获取起始节点类型列表"""
+        node = self.nodes.get("subject")
+        return node.entity_types if node else []
+
+    @property
+    def intermediate_types(self) -> List[str]:
+        """获取中间节点类型列表"""
+        node = self.nodes.get("intermediate")
+        return node.entity_types if node else []
+
+    @property
+    def end_types(self) -> List[str]:
+        """获取终止节点类型列表"""
+        node = self.nodes.get("object")
+        return node.entity_types if node else []
+
+    @property
+    def edge_types(self) -> List[str]:
+        """获取所有边类型（关系谓词）"""
+        predicates = set()
+        for path in self.paths:
+            parts = path.pattern.split(" → ")
+            if len(parts) == 3:
+                predicates.add(parts[1].strip())
+            else:
+                # 尝试其他常见分隔符
+                for sep in [" -> ", " — ", "→"]:
+                    alt_parts = path.pattern.split(sep)
+                    if len(alt_parts) == 3:
+                        predicates.add(alt_parts[1].strip())
+                        break
+                else:
+                    logger.warning(f"路径模式格式异常，无法提取谓词: {path.pattern}")
+        return sorted(predicates)
+
+    # ========== 便捷方法 ==========
+
+    def get_path_rules(self) -> str:
+        """生成路径连接规则字符串（用于 Step 2）"""
+        rules = []
+        for path in self.paths:
+            rules.append(f"  - {path.name}: `{path.pattern}`")
+            rules.append(f"    提示: {path.extraction_hint}")
+        return "\n".join(rules)
+
+    def get_valid_predicates(self) -> str:
+        """返回允许的谓词列表字符串（用于 Step 3 验证）"""
+        return ", ".join(self.edge_types)
+
+    def get_cot_config(self) -> Dict[str, str]:
+        """返回 CoT 配置字典，用于 Prompt 模板填充（内部方法）"""
+        return {
+            "s_types": ", ".join(self.start_types),
+            "i_types": ", ".join(self.intermediate_types),
+            "o_types": ", ".join(self.end_types),
+            "path_rules": self.get_path_rules(),
+            "valid_predicates": self.get_valid_predicates(),
+            "graph_type": self.name,
+            "graph_description": self.description,
+        }
+
+    # ========== CoT 步骤生成 ==========
+
     def get_cot_steps(self) -> List[str]:
-        """生成图结构驱动的 CoT 步骤"""
+        """生成图结构驱动的递进式 CoT 步骤（外部接口）"""
         steps: List[str] = []
 
-        node_lines: List[str] = []
-        role_names = {"subject": "S(起始)", "intermediate": "I(中间)", "object": "O(终止)"}
-        for role, node in self.nodes.items():
-            role_cn = role_names.get(role, role)
-            types_str = ", ".join(node.entity_types)
-            node_lines.append(f"  - **{role_cn}节点**: {types_str}")
-            node_lines.append(f"    {node.description}")
+        # 获取配置
+        i_types = ", ".join(self.intermediate_types)
+        s_types = ", ".join(self.start_types)
+        o_types = ", ".join(self.end_types)
+
+        # 对于通用类型，使用更宽泛的锚点描述
+        if self.type_id == "general_disaster":
+            anchor_desc = "文本描述的**主要对象**（可能是事件、地点或概念）"
+        else:
+            anchor_desc = "灾害事件、设施或机构"
+
+        # Step 1: 锚点与节点识别（强化 I 节点）
         steps.append(
-            "【Step 1: 识别实体并标注角色】\n"
-            "按节点角色分类识别文本中的实体：\n"
-            f"{chr(10).join(node_lines)}\n"
-            "【输出示例】\n"
-            "- S1: \"1998年8月\" (Time)\n"
-            "- I1: \"长江特大洪水\" (FloodEvent)\n"
-            "- O1: \"100万人受灾\" (Impact)\n"
-            "【自检】实体是否为原文子串？角色是否正确？"
+            "【Step 1: 锚点与节点识别】\n"
+            f"1. **首先识别核心锚点 I(中间节点)**: [{i_types}]\n"
+            f"   这是图的核心，通常是{anchor_desc}\n"
+            f"2. **基于锚点，寻找 S(起始节点)**: [{s_types}]\n"
+            "   通常是时间、原因或触发条件\n"
+            f"3. **基于锚点，寻找 O(终止节点)**: [{o_types}]\n"
+            "   通常是影响、数值或响应措施\n"
+            "【约束】实体必须是原文的精确子串\n"
+            "▶ 输出格式：\n"
+            '  I节点: ["实体1", "实体2"]\n'
+            '  S节点: ["实体3"]\n'
+            '  O节点: ["实体4", "实体5"]'
         )
 
-        path_lines: List[str] = []
-        for idx, path in enumerate(self.paths, 1):
-            role_pattern = self._annotate_pattern(path.pattern)
-            path_lines.append(f"  {idx}. **{path.name}**: `{role_pattern}`")
-            path_lines.append(f"     提示: {path.extraction_hint}")
+        # Step 2: 路径驱动关系连接
+        path_rules = self.get_path_rules()
         steps.append(
-            "【Step 2: 路径驱动关系连接】\n"
-            "按路径模式连接已识别节点（S→I→O）：\n"
-            f"{chr(10).join(path_lines)}\n"
-            "自检：关系方向是否正确？是否遗漏路径？"
+            "【Step 2: 路径驱动关系连接】（基于 Step 1 的节点）\n"
+            "任务：将 Step 1 识别的节点按以下路径规则连接\n"
+            f"路径规则（{self.name}）：\n"
+            f"{path_rules}\n"
+            f"可用谓词：{self.get_valid_predicates()}\n"
+            "▶ 输出候选三元组：\n"
+            "  (S节点实体, 谓词, I节点实体)\n"
+            "  (I节点实体, 谓词, O节点实体)"
         )
 
+        # Step 3: 证据回溯与逻辑验证（增加逻辑解释要求）
         steps.append(
-            "【Step 3: 证据回溯与三元组生成】\n"
-            "为每条候选关系寻找原文证据：\n"
-            "1) 证据句来自原文\n"
-            "2) 主语/宾语至少有一个出现在证据句中\n"
-            "找不到证据则丢弃。"
+            "【Step 3: 证据回溯与逻辑验证】（基于 Step 2 的候选三元组）\n"
+            "对 Step 2 的每条候选三元组进行双重验证：\n"
+            "1. **证据验证**：找到原文中的支撑句\n"
+            f"2. **逻辑验证**：谓词是否在可用列表 [{self.get_valid_predicates()}] 中？\n"
+            "   关系方向是否符合 S→I→O 路径？\n"
+            "▶ 输出格式：\n"
+            "  三元组: (主语, 谓词, 宾语)\n"
+            '  证据句: "..."\n'
+            "  逻辑解释: 用一句话解释为什么原文支持该关系（例如：'原文使用了[导致]一词，体现因果关系'）\n"
+            "  判定: ✓保留 / ✗丢弃(原因)"
         )
 
+        # Step 4: JSON 输出（强化 evidence 字段 + 长度限制）
         steps.append(
-            "【Step 4: JSON 输出】\n"
-            "只输出验证通过的三元组，确保 JSON 结构正确。"
+            "【Step 4: 整合输出】（基于 Step 3 的验证结果）\n"
+            "将 Step 3 中判定为'保留'的三元组整合为最终 JSON 格式。\n"
+            "**务必包含 evidence 字段**，直接复制 Step 3 找到的证据句。\n"
+            "**注意**：evidence 仅保留关键短句，不要复制整段长文。"
         )
 
         return steps

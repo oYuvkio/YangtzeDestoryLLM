@@ -102,6 +102,68 @@ def is_error_record(record: Dict[str, Any]) -> bool:
     return bool(record.get("error"))
 
 
+def merge_worker_outputs(args: argparse.Namespace, num_workers: int) -> None:
+    """合并多个 worker 的输出文件。"""
+    logger = setup_logger()
+    
+    # 确定输出路径
+    if args.output:
+        base_output = Path(args.output)
+    else:
+        model_name = args.model or "unknown"
+        model_dir_name = model_name.replace("/", "_").replace(":", "_")
+        base_output = Path(f"outputs/eval_models/{model_dir_name}/predictions.jsonl")
+    
+    stem = base_output.stem
+    suffix = base_output.suffix
+    parent = base_output.parent
+    
+    # 收集所有 worker 文件
+    worker_files = []
+    for wid in range(num_workers):
+        worker_file = parent / f"{stem}_worker{wid}{suffix}"
+        if worker_file.exists():
+            worker_files.append((wid, worker_file))
+        else:
+            logger.warning(f"Worker {wid} 输出文件不存在: {worker_file}")
+    
+    if not worker_files:
+        logger.error("没有找到任何 worker 输出文件")
+        return
+    
+    logger.info(f"找到 {len(worker_files)}/{num_workers} 个 worker 输出文件")
+    
+    # 读取所有记录，按 doc_id 去重（保留最新）
+    all_records: Dict[str, Dict[str, Any]] = {}
+    total_count = 0
+    
+    for wid, wfile in sorted(worker_files):
+        count = 0
+        with open(wfile, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                    doc_id = record.get("doc_id", "")
+                    if doc_id:
+                        all_records[doc_id] = record
+                        count += 1
+                except json.JSONDecodeError:
+                    continue
+        logger.info(f"Worker {wid}: 读取 {count} 条记录")
+        total_count += count
+    
+    # 写入合并文件
+    merged_output = parent / f"{stem}_merged{suffix}"
+    with open(merged_output, "w", encoding="utf-8") as f:
+        for record in all_records.values():
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    
+    logger.info(f"合并完成: {len(all_records)} 条唯一记录 (原始 {total_count} 条)")
+    logger.info(f"输出文件: {merged_output}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="在测试集上运行 P5 抽取")
     parser.add_argument("--cfg", default="configs/cfg.yaml", help="配置文件路径")
@@ -143,6 +205,9 @@ def main() -> None:
     # 后校验开关（默认开启，通过 --no-verify 关闭）
     parser.add_argument("--no-verify", action="store_true",
                         help="禁用原文回溯校验（用于消融实验，默认开启校验）")
+    # 图结构检测开关（默认开启，通过 --no-graph 关闭）
+    parser.add_argument("--no-graph", action="store_true",
+                        help="禁用图结构自动检测，强制使用通用结构（用于消融实验，默认开启图结构检测）")
     strict_schema_group = parser.add_mutually_exclusive_group()
     strict_schema_group.add_argument("--strict-schema", action="store_true", dest="strict_schema",
                                      default=True, help="严格执行 Schema 约束（默认开启）")
@@ -156,6 +221,14 @@ def main() -> None:
     # 完整文本来源
     parser.add_argument("--text-source", type=str, default=None,
                         help="完整文本来源文件（如 pool_v3.jsonl），用 id 字段与输入文件的 doc_id 映射")
+    
+    # 多进程并行参数
+    parser.add_argument("--num-workers", "-n", type=int, default=1,
+                        help="总进程数（默认 1，单进程）")
+    parser.add_argument("--worker-id", "-id", type=int, default=0,
+                        help="当前进程编号（从 0 开始，默认 0）")
+    parser.add_argument("--merge", action="store_true",
+                        help="合并多个 worker 的输出文件（与 -n 配合使用）")
 
     args = parser.parse_args()
 
@@ -163,10 +236,30 @@ def main() -> None:
         os.environ["OPENAI_API_KEYS"] = args.api_key
         os.environ["OPENAI_API_KEY"] = args.api_key.split(",")[0]
 
+    # 验证多进程参数
+    num_workers = args.num_workers
+    worker_id = args.worker_id
+    if num_workers < 1:
+        num_workers = 1
+    if worker_id < 0 or worker_id >= num_workers:
+        print(f"错误: worker_id ({worker_id}) 必须在 [0, {num_workers - 1}] 范围内")
+        return
+
+    # 如果是合并模式，执行合并后退出
+    if args.merge:
+        merge_worker_outputs(args, num_workers)
+        return
+
     # 逻辑转换：默认都开启，通过 --no-* 关闭
     use_cot = not args.no_cot
     use_verify = not args.no_verify
+    use_graph = not args.no_graph
     strict_schema = args.strict_schema
+
+    # 参数组合逻辑：--no-graph 在 --no-cot 模式下无效
+    if not use_cot and not use_graph:
+        use_graph = True  # 重置，避免混淆（图结构是 CoT 的一部分）
+
     logger = setup_logger()
 
     # 加载配置
@@ -194,6 +287,12 @@ def main() -> None:
         model_dir_name = model_name.replace("/", "_").replace(":", "_")
         output_path = Path(f"outputs/eval_models/{model_dir_name}/predictions.jsonl")
 
+    # 多进程模式下，每个 worker 写入独立文件
+    if num_workers > 1:
+        stem = output_path.stem
+        suffix = output_path.suffix
+        output_path = output_path.with_name(f"{stem}_worker{worker_id}{suffix}")
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     # 加载测试集
@@ -205,6 +304,14 @@ def main() -> None:
     samples = load_test_samples(test_file)
     if args.limit:
         samples = samples[:args.limit]
+
+    # 多进程分片：按取模法筛选当前 worker 负责的样本
+    total_samples = len(samples)
+    if num_workers > 1:
+        samples = [(i, s) for i, s in enumerate(samples) if i % num_workers == worker_id]
+        logger.info(f"Worker {worker_id}/{num_workers}: 负责 {len(samples)}/{total_samples} 个样本")
+    else:
+        samples = [(i, s) for i, s in enumerate(samples)]
 
     logger.info(f"测试集样本数: {len(samples)}")
 
@@ -242,7 +349,7 @@ def main() -> None:
         llm_config["base_url"] = base_url
 
     logger.info(
-        "LLM 配置: provider=%s, model=%s, temperature=%s, top_p=%s, timeout=%ss, use_cot=%s, use_verify=%s",
+        "LLM 配置: provider=%s, model=%s, temperature=%s, top_p=%s, timeout=%ss, use_cot=%s, use_verify=%s, use_graph=%s",
         provider,
         model_name,
         temperature,
@@ -250,8 +357,11 @@ def main() -> None:
         timeout,
         use_cot,
         use_verify,
+        use_graph,
     )
     logger.info("Schema 严格约束: %s", "开启" if strict_schema else "关闭")
+    if num_workers > 1:
+        logger.info("多进程模式: worker %d / %d", worker_id, num_workers)
 
     pipeline = CQLLMPipeline(
         llm_config=llm_config,
@@ -309,8 +419,8 @@ def main() -> None:
             out_f.flush()
             logger.info("保留正常记录: %d 条（准备重跑 error 记录）", preserved_count)
 
-        for idx, sample in enumerate(samples, start=1):
-            doc_id = resolve_doc_id(sample, idx)
+        for proc_idx, (orig_idx, sample) in enumerate(samples, start=1):
+            doc_id = resolve_doc_id(sample, orig_idx + 1)
             source_text, source_tag = resolve_source_text(
                 sample,
                 doc_id,
@@ -324,7 +434,7 @@ def main() -> None:
                     if source_tag == "missing_text_source"
                     else "empty_source_text"
                 )
-                logger.warning(f"[{idx}/{len(samples)}] {doc_id}: 无有效文本({source_tag})，跳过")
+                logger.warning(f"[{proc_idx}/{len(samples)}] {doc_id}: 无有效文本({source_tag})，跳过")
                 error_record = build_extraction_record(
                     doc_id=doc_id,
                     source_text="",
@@ -342,10 +452,10 @@ def main() -> None:
             # 跳过已存在的
             if doc_id in existing_predictions and (args.skip_existing or args.retry_errors):
                 if args.retry_errors and doc_id in error_doc_ids:
-                    logger.info(f"[{idx}/{len(samples)}] {doc_id}: 发现 error 记录，重新抽取")
+                    logger.info(f"[{proc_idx}/{len(samples)}] {doc_id}: 发现 error 记录，重新抽取")
                 else:
                     skip_count += 1
-                    logger.info(f"[{idx}/{len(samples)}] {doc_id}: 跳过已存在")
+                    logger.info(f"[{proc_idx}/{len(samples)}] {doc_id}: 跳过已存在")
                     continue
 
             # 执行抽取
@@ -357,6 +467,7 @@ def main() -> None:
                         save_path=None,
                         favor_existing_classes=args.favor_existing,
                         use_cot=use_cot,
+                        use_graph=use_graph,
                         strict_filter=args.strict_filter,
                         fuzzy_threshold=args.fuzzy_threshold,
                         strict_schema=strict_schema,
@@ -368,6 +479,7 @@ def main() -> None:
                         save_path=None,
                         favor_existing_classes=args.favor_existing,
                         use_cot=use_cot,
+                        use_graph=use_graph,
                     )
 
                 output_record = build_extraction_record(
@@ -376,13 +488,14 @@ def main() -> None:
                     extraction_result=res,
                     use_cot=use_cot,
                     use_verify=use_verify,
+                    use_graph=use_graph,
                     include_source_text=False,
                 )
 
                 if output_record.get("error"):
                     error_count += 1
                     logger.error(
-                        f"[{idx}/{len(samples)}] {doc_id}: error={output_record.get('error')}"
+                        f"[{proc_idx}/{len(samples)}] {doc_id}: error={output_record.get('error')}"
                     )
                     out_f.write(json.dumps(output_record, ensure_ascii=False) + "\n")
                     out_f.flush()
@@ -396,17 +509,17 @@ def main() -> None:
                 if use_verify:
                     if filtered_count > 0:
                         logger.info(
-                            f"[{idx}/{len(samples)}] {doc_id}: 事件 {event_count}, "
+                            f"[{proc_idx}/{len(samples)}] {doc_id}: 事件 {event_count}, "
                             f"三元组 {triple_count} (幻觉率: {rate:.1%})"
                         )
                     else:
                         logger.info(
-                            f"[{idx}/{len(samples)}] {doc_id}: 事件 {event_count}, "
+                            f"[{proc_idx}/{len(samples)}] {doc_id}: 事件 {event_count}, "
                             f"三元组 {triple_count} (无幻觉)"
                         )
                 else:
                     logger.info(
-                        f"[{idx}/{len(samples)}] {doc_id}: 事件 {event_count}, "
+                        f"[{proc_idx}/{len(samples)}] {doc_id}: 事件 {event_count}, "
                         f"三元组 {triple_count} [Raw]"
                     )
 
@@ -428,7 +541,7 @@ def main() -> None:
                 out_f.write(json.dumps(error_record, ensure_ascii=False) + "\n")
                 out_f.flush()
                 error_count += 1
-                logger.error(f"[{idx}/{len(samples)}] {doc_id}: {error_msg}")
+                logger.error(f"[{proc_idx}/{len(samples)}] {doc_id}: {error_msg}")
 
                 if is_quota_error(error_msg):
                     quota_exhausted = True
@@ -436,7 +549,7 @@ def main() -> None:
                     break
 
             # 间隔
-            if args.interval > 0 and idx < len(samples):
+            if args.interval > 0 and proc_idx < len(samples):
                 time.sleep(args.interval)
 
     # 保存元数据
@@ -445,13 +558,17 @@ def main() -> None:
         "model": model_name,
         "tbox": str(tbox_path),
         "test_file": str(test_file),
-        "total_samples": len(samples),
+        "total_samples": total_samples,
+        "worker_samples": len(samples),
+        "num_workers": num_workers,
+        "worker_id": worker_id,
         "success_count": success_count,
         "skip_count": skip_count,
         "error_count": error_count,
         "quota_exhausted": quota_exhausted,
         "use_cot": use_cot,
         "use_verify": use_verify,
+        "use_graph": use_graph,
         "strict_schema": strict_schema,
         "retry_errors": args.retry_errors,
         "output": str(output_path),

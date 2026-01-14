@@ -1083,45 +1083,139 @@ def compute_entity_redundancy_rate(predictions: Any) -> Dict[str, Any]:
     }
 
 
-def compute_entity_f1(predictions: Any, gold: Any) -> Tuple[ExtractionMetrics, Dict[str, int]]:
+def compute_entity_f1(
+    predictions: Any,
+    gold: Any,
+    match_type: bool = False,
+    fuzzy_threshold: float = 0.0,
+) -> Tuple[ExtractionMetrics, Dict[str, Any]]:
     """
     计算实体抽取 F1。
-    从 entities 字段和 triples 的 subject/object 中提取实体，只比较名称。
+    从 entities 字段和 triples 的 subject/object 中提取实体。
+
+    Args:
+        predictions: 预测结果
+        gold: 标注数据
+        match_type: True 时需要 (name, type) 都匹配，False 时只匹配 name
+        fuzzy_threshold: >0 时启用模糊匹配（子串匹配 + 字符相似度）
+
+    Returns:
+        (metrics, stats): 指标和统计信息
     """
     pred_records = _ensure_records(predictions)
     gold_records = _ensure_records(gold)
 
-    def extract_entities(records: Dict[str, Any]) -> Set[str]:
-        entities: Set[str] = set()
+    def extract_entities(records: Dict[str, Any], with_type: bool) -> Set[Tuple[str, ...]]:
+        entities: Set[Tuple[str, ...]] = set()
         # 从 entities 字段提取
         for e in records.get("entities", []):
             if isinstance(e, dict):
                 name = _normalize_text(e.get("name", ""))
                 if name:
-                    entities.add(name)
+                    if with_type:
+                        etype = _normalize_text(e.get("type", ""))
+                        entities.add((name, etype))
+                    else:
+                        entities.add((name,))
         # 从 triples 的 subject/object 提取
         for t in records.get("triples", []):
             if isinstance(t, dict):
-                subj = _normalize_text(t.get("subject", ""))
-                obj = _normalize_text(t.get("object", ""))
-                if subj:
-                    entities.add(subj)
-                if obj:
-                    entities.add(obj)
+                for field, type_field in [("subject", "subject_type"), ("object", "object_type")]:
+                    val = _normalize_text(t.get(field, ""))
+                    if val:
+                        if with_type:
+                            vtype = _normalize_text(t.get(type_field, ""))
+                            entities.add((val, vtype))
+                        else:
+                            entities.add((val,))
         return entities
 
-    pred_entities = extract_entities(pred_records)
-    gold_entities = extract_entities(gold_records)
+    pred_entities = extract_entities(pred_records, with_type=match_type)
+    gold_entities = extract_entities(gold_records, with_type=match_type)
 
+    # 精确匹配
     tp = len(pred_entities & gold_entities)
+
+    # 模糊匹配（可选）
+    fuzzy_matched = 0
+    if fuzzy_threshold > 0:
+        unmatched_pred = pred_entities - gold_entities
+        unmatched_gold = gold_entities - pred_entities
+        used_gold: Set[Tuple[str, ...]] = set()
+        for p in unmatched_pred:
+            for g in unmatched_gold:
+                if g in used_gold:
+                    continue
+                # 比较名称（第一个元素）
+                if _fuzzy_entity_match(p[0], g[0], fuzzy_threshold):
+                    # 如果需要匹配类型，检查类型是否一致
+                    if not match_type or (len(p) > 1 and len(g) > 1 and p[1] == g[1]):
+                        tp += 1
+                        fuzzy_matched += 1
+                        used_gold.add(g)
+                        break
+
     metrics = _calc_prf(tp, len(pred_entities), len(gold_entities))
 
-    stats = {
+    stats: Dict[str, Any] = {
         "pred_count": len(pred_entities),
         "gold_count": len(gold_entities),
         "matched": tp,
+        "match_type_enabled": match_type,
+        "fuzzy_threshold": fuzzy_threshold,
+        "fuzzy_matched": fuzzy_matched,
     }
     return metrics, stats
+
+
+def compute_corpus_metrics(
+    all_predictions: List[Dict[str, Any]],
+    all_golds: List[Dict[str, Any]],
+    aggregation: str = "micro",
+    match_type: bool = False,
+    fuzzy_threshold: float = 0.0,
+) -> Dict[str, ExtractionMetrics]:
+    """
+    语料库级别的指标计算。
+
+    Args:
+        all_predictions: 所有预测结果列表
+        all_golds: 所有标注数据列表
+        aggregation: 聚合方式，"micro" 或 "macro"
+            - micro: 全局 TP/FP/FN 汇总后计算 P/R/F1
+            - macro: 每个样本计算 P/R/F1 后取平均
+        match_type: 是否需要类型匹配
+        fuzzy_threshold: 模糊匹配阈值
+
+    Returns:
+        包含 entity 指标的字典
+    """
+    if aggregation == "micro":
+        total_tp, total_pred, total_gold = 0, 0, 0
+        for pred, gold in zip(all_predictions, all_golds):
+            _, stats = compute_entity_f1(
+                pred, gold, match_type=match_type, fuzzy_threshold=fuzzy_threshold
+            )
+            total_tp += stats["matched"]
+            total_pred += stats["pred_count"]
+            total_gold += stats["gold_count"]
+        return {"entity": _calc_prf(total_tp, total_pred, total_gold)}
+
+    else:  # macro
+        all_metrics = []
+        for pred, gold in zip(all_predictions, all_golds):
+            metrics, _ = compute_entity_f1(
+                pred, gold, match_type=match_type, fuzzy_threshold=fuzzy_threshold
+            )
+            all_metrics.append(metrics)
+
+        if not all_metrics:
+            return {"entity": ExtractionMetrics(precision=0, recall=0, f1=0)}
+
+        avg_precision = sum(m.precision for m in all_metrics) / len(all_metrics)
+        avg_recall = sum(m.recall for m in all_metrics) / len(all_metrics)
+        avg_f1 = sum(m.f1 for m in all_metrics) / len(all_metrics)
+        return {"entity": ExtractionMetrics(precision=avg_precision, recall=avg_recall, f1=avg_f1)}
 
 
 def compute_relation_f1(predictions: Any, gold: Any) -> Tuple[ExtractionMetrics, Dict[str, int]]:
@@ -1303,7 +1397,10 @@ def compute_full_metrics(
     hallucination_stats = compute_hallucination_rate(predictions)
     redundancy_stats = compute_entity_redundancy_rate(predictions)
 
-    entity_metrics, entity_stats = compute_entity_f1(predictions, gold)
+    # 实体 F1：仅名称匹配（向后兼容）
+    entity_metrics, entity_stats = compute_entity_f1(predictions, gold, match_type=False)
+    # 实体 F1：名称+类型匹配
+    entity_metrics_with_type, entity_stats_with_type = compute_entity_f1(predictions, gold, match_type=True)
     relation_metrics, relation_stats = compute_relation_f1(predictions, gold)
     schema_coverage = compute_schema_coverage(predictions, tbox)
 
@@ -1324,6 +1421,7 @@ def compute_full_metrics(
         "triple_f1_strict": round(triple_f1["strict"].f1, 4),
         "triple_f1_relaxed": round(triple_f1["relaxed"].f1, 4),
         "entity_f1": round(entity_metrics.f1, 4),
+        "entity_f1_with_type": round(entity_metrics_with_type.f1, 4),
         "relation_f1": round(relation_metrics.f1, 4),
         "partial_match_f1": partial_match["partial_match_f1"],
 
@@ -1332,6 +1430,7 @@ def compute_full_metrics(
         "triple_metrics_strict": triple_f1["strict"].to_dict(),
         "triple_metrics_relaxed": triple_f1["relaxed"].to_dict(),
         "entity_metrics": entity_metrics.to_dict(),
+        "entity_metrics_with_type": entity_metrics_with_type.to_dict(),
         "relation_metrics": relation_metrics.to_dict(),
         "partial_match_metrics": partial_match,
 
@@ -1365,6 +1464,7 @@ def compute_full_metrics(
         "direction_error_stats": direction_errors,
         "ece_stats": ece_stats,
         "entity_stats": entity_stats,
+        "entity_stats_with_type": entity_stats_with_type,
         "relation_stats": relation_stats,
 
         # 分类别指标
@@ -1519,7 +1619,10 @@ def _compute_aggregated_report(
     # 聚合计算
     hallucination_stats = compute_hallucination_rate(preds)
     redundancy_stats = compute_entity_redundancy_rate(preds)
-    entity_metrics_agg, _ = compute_entity_f1(preds, gold)
+    # 实体 F1：仅名称匹配
+    entity_metrics_agg, _ = compute_entity_f1(preds, gold, match_type=False)
+    # 实体 F1：名称+类型匹配
+    entity_metrics_with_type_agg, _ = compute_entity_f1(preds, gold, match_type=True)
     relation_metrics_agg, _ = compute_relation_f1(preds, gold)
     schema_coverage_agg = compute_schema_coverage(preds, tbox)
 
@@ -1540,6 +1643,7 @@ def _compute_aggregated_report(
         "triple_f1_strict": round(mean([m["triple_f1_strict"] for m in all_metrics]), 4),
         "triple_f1_relaxed": round(mean([m["triple_f1_relaxed"] for m in all_metrics]), 4),
         "entity_f1": round(mean([m["entity_f1"] for m in all_metrics]), 4),
+        "entity_f1_with_type": round(mean([m["entity_f1_with_type"] for m in all_metrics]), 4),
         "relation_f1": round(mean([m["relation_f1"] for m in all_metrics]), 4),
         "partial_match_f1": partial_match_agg["partial_match_f1"],
 
@@ -1560,6 +1664,7 @@ def _compute_aggregated_report(
             "f1": round(mean([m["triple_metrics_relaxed"]["f1"] for m in all_metrics]), 4),
         },
         "entity_metrics": entity_metrics_agg.to_dict(),
+        "entity_metrics_with_type": entity_metrics_with_type_agg.to_dict(),
         "relation_metrics": relation_metrics_agg.to_dict(),
         "partial_match_metrics": partial_match_agg,
 

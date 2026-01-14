@@ -1116,6 +1116,10 @@ P5_COT_EXTRACTION_PROMPT = """
 
 
 # ========== P5：图结构增强的链式 CoT 抽取 ==========
+
+# 注：递进式 CoT 步骤由 GraphStructure.get_cot_steps() 动态生成
+# 如需使用模板方式，可调用 graph_structure.get_cot_config() 获取配置字典
+
 P5_GRAPH_COT_EXTRACTION_PROMPT = """
 你是一名水旱灾害知识图谱构建专家。
 

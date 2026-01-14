@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-根据 Manifest 过滤语料并导出（支持 P4/P5/EVAL 三分法）。
+根据 Manifest 过滤语料并导出（支持 P5/EVAL 二分法）。
 
 功能：
 - 根据 manifest 文件过滤输入语料
@@ -9,14 +9,6 @@
 - 自动拆分 EVAL 为 dev/test
 
 使用示例：
-    # 导出 P4 语料（本体增强用）
-    python filters/apply_manifest.py \\
-        --input data/corpus_for_kg/filtered_ytz_corpus/light_pool_dedup.jsonl \\
-        --manifest data/manifests/purpose_manifest.jsonl \\
-        --purpose P4 \\
-        --out data/corpus_for_onto/p4_only.jsonl \\
-        --log-file logs/manifest/apply_p4.log
-
     # 导出 P5 语料（建图用）
     python filters/apply_manifest.py \\
         --input data/corpus_for_kg/filtered_ytz_corpus/light_pool_dedup.jsonl \\
@@ -61,10 +53,10 @@ if str(PROJECT_ROOT) not in sys.path:
 # ==============================================================================
 class Constants:
     """全局常量"""
-    VERSION: Final[str] = "1.1.0"
+    VERSION: Final[str] = "2.0.0"
     TOOL_NAME: Final[str] = "Manifest 过滤导出工具"
-    
-    VALID_PURPOSES: Final[Set[str]] = {"P4", "P5", "EVAL"}
+
+    VALID_PURPOSES: Final[Set[str]] = {"P5", "EVAL"}
     VALID_SPLIT_LEVELS: Final[Set[str]] = {"doc", "section"}
     VALID_FOLDS: Final[Set[str]] = {"dev", "test"}
 
@@ -390,11 +382,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 导出 P4 语料
-  python filters/apply_manifest.py --input data/pool.jsonl --manifest data/manifests/manifest.jsonl \\
-      --purpose P4 --out data/corpus_for_onto/p4_only.jsonl
-
-  # 导出 P5 语料
+  # 导出 P5 语料（建图用）
   python filters/apply_manifest.py --input data/pool.jsonl --manifest data/manifests/manifest.jsonl \\
       --purpose P5 --out data/corpus_for_kg/p5_only.jsonl
 
@@ -402,7 +390,7 @@ def parse_args() -> argparse.Namespace:
   python filters/apply_manifest.py --input data/pool.jsonl --manifest data/manifests/manifest.jsonl \\
       --purpose EVAL --out data/p5_eval_pool/pool.jsonl
 
-  # 同时导出 P5 和 EVAL（用于 KG 构建）
+  # 同时导出 P5 和 EVAL
   python filters/apply_manifest.py --input data/pool.jsonl --manifest data/manifests/manifest.jsonl \\
       --purpose P5,EVAL --out data/corpus_for_kg/p5_eval.jsonl
 

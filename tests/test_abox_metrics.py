@@ -27,6 +27,8 @@ from tools.abox_metrics import (
     compute_tbox_consistency,
     compute_ece,
     compute_full_metrics,
+    compute_entity_f1,
+    compute_corpus_metrics,
 )
 
 
@@ -340,6 +342,116 @@ class TestFullMetrics:
         for field in required_fields:
             assert field in result, f"缺少字段: {field}"
 
+        # 检查新增的 entity_f1_with_type 字段
+        assert "entity_f1_with_type" in result, "缺少字段: entity_f1_with_type"
+        assert "entity_metrics_with_type" in result, "缺少字段: entity_metrics_with_type"
+
+
+class TestEntityF1:
+    """测试实体 F1 计算"""
+
+    def test_entity_f1_name_only(self):
+        """仅名称匹配"""
+        pred = {"entities": [
+            {"name": "洪水", "type": "DisasterEvent"},
+            {"name": "武汉", "type": "GeographicRegion"},
+        ]}
+        gold = {"entities": [
+            {"name": "洪水", "type": "FloodEvent"},  # 类型不同
+            {"name": "武汉", "type": "GeographicRegion"},
+        ]}
+        metrics, stats = compute_entity_f1(pred, gold, match_type=False)
+        assert stats["matched"] == 2  # 名称匹配即可
+        assert metrics.f1 == 1.0
+        assert stats["match_type_enabled"] == False
+
+    def test_entity_f1_with_type(self):
+        """名称+类型匹配"""
+        pred = {"entities": [
+            {"name": "洪水", "type": "DisasterEvent"},
+            {"name": "武汉", "type": "GeographicRegion"},
+        ]}
+        gold = {"entities": [
+            {"name": "洪水", "type": "FloodEvent"},  # 类型不同
+            {"name": "武汉", "type": "GeographicRegion"},
+        ]}
+        metrics, stats = compute_entity_f1(pred, gold, match_type=True)
+        assert stats["matched"] == 1  # 只有武汉匹配
+        assert stats["match_type_enabled"] == True
+
+    def test_entity_f1_fuzzy_match(self):
+        """模糊匹配"""
+        pred = {"entities": [{"name": "1998年洪水灾害", "type": ""}]}
+        gold = {"entities": [{"name": "1998年洪水", "type": ""}]}
+        # 不启用模糊匹配时应该不匹配
+        metrics_strict, stats_strict = compute_entity_f1(pred, gold, fuzzy_threshold=0.0)
+        assert stats_strict["matched"] == 0
+
+        # 启用模糊匹配时应该匹配（子串匹配）
+        metrics_fuzzy, stats_fuzzy = compute_entity_f1(pred, gold, fuzzy_threshold=0.7)
+        assert stats_fuzzy["matched"] == 1
+        assert stats_fuzzy["fuzzy_matched"] == 1
+
+    def test_entity_f1_from_triples(self):
+        """从三元组中提取实体"""
+        pred = {"triples": [
+            {"subject": "洪水", "predicate": "affects", "object": "武汉"},
+        ]}
+        gold = {"triples": [
+            {"subject": "洪水", "predicate": "affects", "object": "武汉"},
+        ]}
+        metrics, stats = compute_entity_f1(pred, gold)
+        assert stats["matched"] == 2  # 洪水和武汉
+        assert metrics.f1 == 1.0
+
+
+class TestCorpusMetrics:
+    """测试语料库级别指标计算"""
+
+    def test_micro_aggregation(self):
+        """Micro F1 聚合"""
+        preds = [
+            {"entities": [{"name": "A", "type": ""}]},
+            {"entities": [{"name": "B", "type": ""}, {"name": "C", "type": ""}]},
+        ]
+        golds = [
+            {"entities": [{"name": "A", "type": ""}]},
+            {"entities": [{"name": "B", "type": ""}, {"name": "D", "type": ""}]},
+        ]
+        result = compute_corpus_metrics(preds, golds, aggregation="micro")
+        # 全局: TP=2 (A, B), pred=3, gold=3
+        # P = 2/3, R = 2/3, F1 = 2/3
+        assert abs(result["entity"].f1 - 0.6667) < 0.01
+
+    def test_macro_aggregation(self):
+        """Macro F1 聚合"""
+        preds = [
+            {"entities": [{"name": "A", "type": ""}]},
+            {"entities": [{"name": "B", "type": ""}]},
+        ]
+        golds = [
+            {"entities": [{"name": "A", "type": ""}]},
+            {"entities": [{"name": "C", "type": ""}]},
+        ]
+        result = compute_corpus_metrics(preds, golds, aggregation="macro")
+        # 样本1: F1=1.0, 样本2: F1=0.0
+        # Macro F1 = (1.0 + 0.0) / 2 = 0.5
+        assert abs(result["entity"].f1 - 0.5) < 0.01
+
+    def test_corpus_metrics_with_type(self):
+        """带类型匹配的语料库指标"""
+        preds = [
+            {"entities": [{"name": "A", "type": "TypeA"}]},
+            {"entities": [{"name": "B", "type": "TypeB"}]},
+        ]
+        golds = [
+            {"entities": [{"name": "A", "type": "TypeA"}]},
+            {"entities": [{"name": "B", "type": "TypeC"}]},  # 类型不同
+        ]
+        result = compute_corpus_metrics(preds, golds, aggregation="micro", match_type=True)
+        # 只有第一个样本的 A 匹配
+        assert result["entity"].f1 == 0.5
+
 
 # 运行测试
 if __name__ == "__main__":
@@ -359,6 +471,8 @@ if __name__ == "__main__":
             TestTBoxConsistency,
             TestECE,
             TestFullMetrics,
+            TestEntityF1,
+            TestCorpusMetrics,
         ]
 
         passed = 0

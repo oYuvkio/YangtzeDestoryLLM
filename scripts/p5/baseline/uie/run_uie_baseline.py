@@ -111,10 +111,15 @@ def load_tbox_config(tbox_path: Path) -> Tuple[
     Dict[str, str],               # label_to_event_type
     List[Tuple[str, str]],        # event_keywords
     str,                          # fallback_type
-    List[str],                    # ner_labels (新增)
-    Dict[str, str],               # label_to_entity_type (新增)
+    List[str],                    # ner_labels
+    Dict[str, str],               # label_to_entity_type
+    Dict[str, List[str]],         # nested_re_schema: {subject_cn_type: [relation_cn_labels]}
+    Dict[str, str],               # relation_to_range_cn: {relation_cn: range_cn_type}
 ]:
-    """加载 TBox，构建 UIE schema 与映射关系（包含 NER 和 RE）。"""
+    """加载 TBox，构建 UIE schema 与映射关系（包含 NER 和 RE）。
+    
+    新增嵌套 RE schema：根据 domain/range 定义，为每个 subject 类型指定对应关系。
+    """
     tbox = json.loads(tbox_path.read_text(encoding="utf-8"))
     relations = tbox.get("relations", []) or []
     classes = tbox.get("classes", []) or []
@@ -148,12 +153,44 @@ def load_tbox_config(tbox_path: Path) -> Tuple[
     # ========== NER Schema ==========
     ner_labels: List[str] = []
     label_to_entity_type: Dict[str, str] = {}
+    entity_type_to_cn: Dict[str, str] = {}  # 英文 → 中文映射
     for c in classes:
         cn_name = c.get("cn_name", "")
         en_name = c.get("name", "")
         if cn_name and en_name:
             ner_labels.append(cn_name)
             label_to_entity_type[cn_name] = en_name
+            entity_type_to_cn[en_name] = cn_name
+
+    # ========== 嵌套 RE Schema (按 domain → relations 组织) ==========
+    # nested_re_schema: {subject_cn_type: [relation_cn_labels]}
+    # 这样 UIE 可以同时抽取 subject 实体和其对应的关系
+    nested_re_schema: Dict[str, List[str]] = {}
+    relation_to_range_cn: Dict[str, str] = {}  # relation_cn → range_cn (取第一个)
+    
+    for rel in relations:
+        rel_cn = rel.get("cn_name") or rel.get("name", "")
+        if not rel_cn:
+            continue
+        domains = rel.get("domain", [])
+        ranges = rel.get("range", [])
+        
+        # 记录关系对应的宾语类型（取第一个 range）
+        if ranges and rel_cn not in relation_to_range_cn:
+            first_range = ranges[0] if isinstance(ranges, list) else ranges
+            relation_to_range_cn[rel_cn] = entity_type_to_cn.get(first_range, first_range)
+        
+        # 为每个 domain 类型添加该关系
+        for domain in domains:
+            domain_cn = entity_type_to_cn.get(domain, domain)
+            if domain_cn not in nested_re_schema:
+                nested_re_schema[domain_cn] = []
+            if rel_cn not in nested_re_schema[domain_cn]:
+                nested_re_schema[domain_cn].append(rel_cn)
+    
+    logging.info(f"[UIE] 嵌套 RE Schema: {len(nested_re_schema)} 个 subject 类型")
+    for subj_cn, rels in list(nested_re_schema.items())[:3]:
+        logging.info(f"  - {subj_cn}: {rels[:5]}...")
 
     return (
         event_label,
@@ -164,7 +201,47 @@ def load_tbox_config(tbox_path: Path) -> Tuple[
         fallback_type,
         ner_labels,
         label_to_entity_type,
+        nested_re_schema,
+        relation_to_range_cn,
     )
+
+
+# ========== 无效实体名过滤 ==========
+# 这些是 UIE 模型当找不到实体时返回的占位符
+INVALID_ENTITY_NAMES = {
+    "无相应实体",
+    "无",
+    "暂无",
+    "无此实体",
+    "未知",
+    "N/A",
+    "null",
+    "None",
+    "",
+}
+
+# 无效特征：实体名中包含这些片段也认为无效
+INVALID_ENTITY_PATTERNS = [
+    "**回答",
+    "\n**回答",
+]
+
+
+def is_valid_entity_name(name: str) -> bool:
+    """检查实体名是否有效。"""
+    if not name or not name.strip():
+        return False
+    name = name.strip()
+    if name in INVALID_ENTITY_NAMES:
+        return False
+    # 检查是否包含无效片段
+    for pattern in INVALID_ENTITY_PATTERNS:
+        if pattern in name:
+            return False
+    # 检查是否是逗号分隔的多个实体（这类输出不规范）
+    if "," in name and len(name.split(",")) > 3:
+        return False
+    return True
 
 
 def guess_event_type(text: str, keywords: List[Tuple[str, str]], fallback_type: str) -> str:
@@ -178,11 +255,18 @@ def parse_ner_output(
     output: Any,
     label_to_entity_type: Dict[str, str],
 ) -> List[Dict[str, Any]]:
-    """解析 NER 模式的 UIE 输出，返回实体列表。"""
+    """解析 NER 模式的 UIE 输出，返回实体列表。过滤无效实体名。"""
     entities: List[Dict[str, Any]] = []
     seen_entities: set = set()
 
     def add_entity(name: str, entity_type: str) -> None:
+        # 过滤无效实体名
+        if not is_valid_entity_name(name):
+            return
+        # 过滤无效类型
+        if not entity_type or not entity_type.strip():
+            return
+        name = name.strip()
         key = (name, entity_type)
         if key in seen_entities:
             return
@@ -229,20 +313,41 @@ def parse_uie_output(
     label_to_event_type: Dict[str, str],
     event_keywords: List[Tuple[str, str]],
     fallback_type: str,
+    relation_to_range_cn: Dict[str, str] = None,
+    label_to_entity_type: Dict[str, str] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """解析 RE 模式的 UIE 输出，返回事件和三元组列表。过滤无效实体名。"""
     events: List[Dict[str, Any]] = []
     triples: List[Dict[str, Any]] = []
     seen_events = set()
     seen_triples = set()
+    
+    relation_to_range_cn = relation_to_range_cn or {}
+    label_to_entity_type = label_to_entity_type or {}
 
     def add_event(subject_text: str, event_type: str) -> None:
+        # 过滤无效实体
+        if not is_valid_entity_name(subject_text):
+            return
+        subject_text = subject_text.strip()
         key = (subject_text, event_type)
         if key in seen_events:
             return
         events.append(build_event_record(subject_text, event_type))
         seen_events.add(key)
 
-    def add_triple(subject_text: str, predicate_label: str, object_text: str) -> None:
+    def add_triple(
+        subject_text: str,
+        predicate_label: str,
+        object_text: str,
+        subject_type: str = "",
+        object_type: str = "",
+    ) -> None:
+        # 过滤无效实体
+        if not is_valid_entity_name(subject_text) or not is_valid_entity_name(object_text):
+            return
+        subject_text = subject_text.strip()
+        object_text = object_text.strip()
         predicate = label_to_relation.get(predicate_label, predicate_label)
         key = (subject_text, predicate, object_text)
         if key in seen_triples:
@@ -254,15 +359,21 @@ def parse_uie_output(
                 "object": object_text,
                 "event_id": "",
                 "evidence": "",
+                "subject_type": subject_type,
+                "object_type": object_type,
             }
         )
         seen_triples.add(key)
 
     def handle_subject(item: Dict[str, Any], schema_label: str) -> None:
         subject_text = str(item.get("text", "") or "")
-        if not subject_text:
+        if not is_valid_entity_name(subject_text):
             return
-        event_type = label_to_event_type.get(schema_label)
+        subject_text = subject_text.strip()
+        
+        # 确定 subject 类型
+        subject_type_en = label_to_event_type.get(schema_label) or label_to_entity_type.get(schema_label, "")
+        event_type = subject_type_en
         if not event_type:
             event_type = guess_event_type(subject_text, event_keywords, fallback_type)
         add_event(subject_text, event_type)
@@ -271,13 +382,17 @@ def parse_uie_output(
         for rel_label, rel_items in relations.items():
             if not isinstance(rel_items, list):
                 continue
+            # 确定 object 类型（从关系的 range 推断）
+            obj_type_cn = relation_to_range_cn.get(rel_label, "")
+            obj_type_en = label_to_entity_type.get(obj_type_cn, obj_type_cn)
+            
             for rel_obj in rel_items:
                 if not isinstance(rel_obj, dict):
                     continue
                 obj_text = str(rel_obj.get("text", "") or "")
                 if not obj_text:
                     continue
-                add_triple(subject_text, rel_label, obj_text)
+                add_triple(subject_text, rel_label, obj_text, subject_type_en, obj_type_en)
 
     if isinstance(output, dict):
         for label, items in output.items():
@@ -342,6 +457,8 @@ def main() -> None:
         fallback_type,
         ner_labels,
         label_to_entity_type,
+        nested_re_schema,
+        relation_to_range_cn,
     ) = load_tbox_config(tbox_path)
 
     # 根据任务类型构建不同的 schema
@@ -365,8 +482,17 @@ def main() -> None:
         )
 
     if task in ("re", "all"):
-        re_schema = {event_label: relation_labels}
-        logger.info(f"RE Schema: subject={event_label}, relations={len(relation_labels)}")
+        # 使用嵌套 RE schema：{subject_type: [relation_labels]}
+        # 这样 UIE 可以根据 subject 类型抽取对应的关系
+        if nested_re_schema:
+            re_schema = nested_re_schema
+            logger.info(f"RE Schema (嵌套): {len(nested_re_schema)} 个 subject 类型")
+            for subj_cn, rels in list(nested_re_schema.items())[:3]:
+                logger.info(f"  - {subj_cn}: {rels[:3]}..." if len(rels) > 3 else f"  - {subj_cn}: {rels}")
+        else:
+            # 回退到简单 schema
+            re_schema = {event_label: relation_labels}
+            logger.info(f"RE Schema (简单): subject={event_label}, relations={len(relation_labels)}")
         logger.info(f"事件回退类型: {fallback_type}")
         ie_re = Taskflow(
             'information_extraction',
@@ -476,6 +602,8 @@ def main() -> None:
                         label_to_event_type=label_to_event_type,
                         event_keywords=event_keywords,
                         fallback_type=fallback_type,
+                        relation_to_range_cn=relation_to_range_cn,
+                        label_to_entity_type=label_to_entity_type,
                     )
                     logger.info(f"[{idx}/{len(samples)}] {doc_id}: RE 抽取事件 {len(events)}, 三元组 {len(triples)}")
 

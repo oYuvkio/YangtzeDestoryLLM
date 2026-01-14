@@ -39,10 +39,16 @@ from .prompts import (
 from kg.utils.entity_linking import EntityNormalizer, normalize_entity
 from kg.hallucination_filter import HallucinationFilter, filter_hallucinations, VerificationResult
 from kg.entity_fusion import EntityFusion, fuse_knowledge, SimpleEntityNormalizer
-from kg.graph_structure import get_graph_structure_for_text
+from kg.graph_structure import get_graph_structure_for_text, get_graph_structure
 
 
 logger = logging.getLogger(__name__)
+
+# =========================
+# 常量定义
+# =========================
+# 图结构分类置信度阈值，低于此值时降级为 general_disaster
+GRAPH_TYPE_CONFIDENCE_THRESHOLD = 0.3
 
 
 # =========================
@@ -595,11 +601,13 @@ class CQLLMPipeline:
         save_path: Optional[Path] = None,
         favor_existing_classes: bool = True,
         use_cot: bool = True,
+        use_graph: bool = True,
     ) -> Dict[str, Any]:
         """
         在 TBox 约束下抽取事件与三元组。
         favor_existing_classes=True 时，提示尽量复用已有类；False 时鼓励使用新增细粒度类。
         use_cot=True 时，使用 CoT Prompt 并解析思维链结果。
+        use_graph=True 时，自动检测文本类型并使用对应图结构；False 时强制使用通用结构。
         """
         schema_json = json.dumps(
             schema.to_dict(), ensure_ascii=False, indent=2)
@@ -610,7 +618,18 @@ class CQLLMPipeline:
 
         thought = ""
         if use_cot:
-            graph_structure, _, _ = get_graph_structure_for_text(paragraph)
+            # 根据 use_graph 决定是否自动检测图结构
+            if use_graph:
+                graph_structure, type_id, confidence = get_graph_structure_for_text(paragraph)
+                # 置信度兜底：低于阈值时降级为通用结构
+                if confidence < GRAPH_TYPE_CONFIDENCE_THRESHOLD:
+                    graph_structure = get_graph_structure("general_disaster")
+                    type_id = "general_disaster"
+            else:
+                # 消融实验：强制使用通用结构
+                graph_structure = get_graph_structure("general_disaster")
+                type_id = "general_disaster"
+                confidence = 0.0
             graph_prompt = graph_structure.format_for_prompt()
             graph_steps = "\n\n".join(graph_structure.get_cot_steps())
             user_prompt = P5_GRAPH_COT_EXTRACTION_PROMPT.format(
@@ -924,6 +943,7 @@ class CQLLMPipeline:
         save_path: Optional[Path] = None,
         favor_existing_classes: bool = True,
         use_cot: bool = True,
+        use_graph: bool = True,
         strict_filter: bool = True,
         fuzzy_threshold: float = UNIFIED_VERIFICATION_THRESHOLD,
         strict_schema: bool = False,
@@ -948,6 +968,7 @@ class CQLLMPipeline:
             save_path: 保存路径（可选）
             favor_existing_classes: 是否优先使用现有类
             use_cot: 是否使用 CoT Prompt（默认 True）
+            use_graph: 是否使用图结构自动检测（默认 True，False 时强制使用通用结构）
             strict_filter: 是否使用严格过滤模式（仅精确匹配）
             fuzzy_threshold: 模糊匹配阈值（默认使用统一阈值 UNIFIED_VERIFICATION_THRESHOLD）
 
@@ -977,7 +998,18 @@ class CQLLMPipeline:
         else:
             class_usage_hint = "允许充分使用 TBox 中新增的细粒度类（如新补充的 HazardFactor 子类等），鼓励细分事件类型。"
         if use_cot:
-            graph_structure, _, _ = get_graph_structure_for_text(paragraph)
+            # 根据 use_graph 决定是否自动检测图结构
+            if use_graph:
+                graph_structure, type_id, confidence = get_graph_structure_for_text(paragraph)
+                # 置信度兜底：低于阈值时降级为通用结构
+                if confidence < GRAPH_TYPE_CONFIDENCE_THRESHOLD:
+                    graph_structure = get_graph_structure("general_disaster")
+                    type_id = "general_disaster"
+            else:
+                # 消融实验：强制使用通用结构
+                graph_structure = get_graph_structure("general_disaster")
+                type_id = "general_disaster"
+                confidence = 0.0
             graph_prompt = graph_structure.format_for_prompt()
             graph_steps = "\n\n".join(graph_structure.get_cot_steps())
             user_prompt = P5_GRAPH_COT_EXTRACTION_PROMPT.format(
@@ -1012,6 +1044,8 @@ class CQLLMPipeline:
                 res = {"events": [], "triples": [], "error": "cot_parse_failed"}
         else:
             # 非 CoT 模式使用原有的 P5_EXTRACTION_PROMPT
+            type_id = "none"  # 非 CoT 模式不使用图结构
+            confidence = 0.0
             user_prompt = P5_EXTRACTION_PROMPT.format(
                 schema_json=schema_json,
                 event_schema=EVENT_SCHEMA_HINT,
@@ -1070,6 +1104,8 @@ class CQLLMPipeline:
                 "schema_filtered_triples": len(schema_filtered_triples),
                 "after_schema": len(schema_valid_triples),
                 "hallucination_rate_pct": f"{verified.hallucination_rate:.2f}%",
+                "graph_type": type_id,
+                "graph_confidence": round(confidence, 3),
             },
             "verification_log": verified.verification_log,
         }

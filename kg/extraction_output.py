@@ -115,6 +115,7 @@ def build_extraction_record(
     *,
     use_cot: bool = True,
     use_verify: bool = True,
+    use_graph: bool = True,
     max_source_text_len: Optional[int] = None,
     include_source_text: bool = True,
     error: str = "",
@@ -128,6 +129,7 @@ def build_extraction_record(
         extraction_result: 抽取结果（来自 pipeline）
         use_cot: 是否使用 CoT
         use_verify: 是否使用后校验
+        use_graph: 是否使用图结构自动检测
         max_source_text_len: 文本最大长度（None 表示不截断）
         include_source_text: 是否在输出中保留 source_text 字段
         error: 错误信息（优先级高于 extraction_result 内的 error）
@@ -139,6 +141,7 @@ def build_extraction_record(
         "doc_id": doc_id,
         "use_cot": use_cot,
         "use_verify": use_verify,
+        "use_graph": use_graph,
         "entities": [],
         "events": [],
         "triples": [],
