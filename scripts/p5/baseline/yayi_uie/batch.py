@@ -14,7 +14,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .config import ModelConfig
 from .model import ModelLoader
@@ -88,6 +88,7 @@ def load_text_lookup(
     text_source_path: Optional[Path],
     id_fields: Tuple[str, ...] = ("id", "doc_id"),
     text_field: str = "text",
+    allowed_doc_ids: Optional[Set[str]] = None,
 ) -> Dict[str, str]:
     """加载完整文本来源映射
     
@@ -95,6 +96,7 @@ def load_text_lookup(
         text_source_path: 完整文本来源文件路径
         id_fields: doc_id 字段候选名
         text_field: 文本字段名
+        allowed_doc_ids: 仅保留这些 doc_id（None 表示不过滤）
     
     Returns:
         doc_id -> text 的映射
@@ -103,6 +105,8 @@ def load_text_lookup(
         return {}
     if not text_source_path.exists():
         raise FileNotFoundError(f"文本来源文件不存在: {text_source_path}")
+    if allowed_doc_ids is not None and not allowed_doc_ids:
+        return {}
     
     lookup: Dict[str, str] = {}
     with open(text_source_path, "r", encoding="utf-8") as f:
@@ -122,6 +126,8 @@ def load_text_lookup(
                     doc_id = str(value)
                     break
             if not doc_id:
+                continue
+            if allowed_doc_ids is not None and doc_id not in allowed_doc_ids:
                 continue
             
             text = item.get(text_field, "")
@@ -212,8 +218,14 @@ def run_batch_extraction(
     # 加载完整文本映射
     text_lookup: Dict[str, str] = {}
     if text_source_path:
+        doc_id_set: Set[str] = set()
+        for sample in samples:
+            doc_id = pick_doc_id(sample)
+            if doc_id:
+                doc_id_set.add(doc_id)
+        logger.info(f"测试集 doc_id 数量: {len(doc_id_set)}")
         logger.info(f"加载完整文本来源: {text_source_path}")
-        text_lookup = load_text_lookup(text_source_path)
+        text_lookup = load_text_lookup(text_source_path, allowed_doc_ids=doc_id_set)
         logger.info(f"已加载 {len(text_lookup)} 条完整文本")
     
     # 加载 TBox
@@ -449,14 +461,14 @@ def main():
     parser.add_argument(
         "--max-new-tokens",
         type=int,
-        default=8192,
-        help="最大生成 token 数 (默认: 2048)",
+        default=4096,
+        help="最大生成 token 数 (默认: 4096)",
     )
     parser.add_argument(
         "--temperature",
         type=float,
         default=0.1,
-        help="采样温度 (默认: 0.0)",
+        help="采样温度 (默认: 0.1)",
     )
     
     # 运行配置
@@ -487,6 +499,19 @@ def main():
         action="store_true",
         help="调试模式",
     )
+
+    parser.add_argument("--device-map", default="balanced_low_0",
+                    choices=["auto", "balanced", "balanced_low_0", "sequential"],
+                    help="device_map 策略 (默认: balanced_low_0)")
+
+    parser.add_argument("--cpu-memory", default="48GiB",
+                    help="CPU 最大内存上限 (默认: 48GiB)")
+
+    parser.add_argument("--gpu-memory", default="22GiB",
+                    help="每张 GPU 最大显存上限 (默认: 22GiB)")
+
+    parser.add_argument("--offload-folder", default="/hy-tmp/zjx/offload",
+                    help="权重/状态 offload 目录 (默认: /hy-tmp/zjx/offload)")
     
     args = parser.parse_args()
     
@@ -502,6 +527,13 @@ def main():
         model_path=args.model_path,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
+        device_map=args.device_map,
+        max_memory={
+            0: args.gpu_memory,
+            1: args.gpu_memory,
+            2: args.gpu_memory,
+            "cpu": args.cpu_memory,
+    },
     )
     
     # 运行抽取

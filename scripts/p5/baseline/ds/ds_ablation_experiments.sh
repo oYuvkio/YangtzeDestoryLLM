@@ -43,7 +43,7 @@ OUTPUT_BASE="outputs/eval_models_hybrid/ds"
 BASE_URL="https://api.siliconflow.cn/v1/"
 
 #不改
-TEST_FILE="outputs/eval_models/gold/merge_filted_3.jsonl"
+TEST_FILE="outputs/eval_models/gold/merge_filted_2.jsonl"
 TEXT_SOURCE="data/corpus_for_kg/filtered_ytz_corpus/light_pool_v2_dedup.jsonl"
 TBOX="outputs/kg_final/tbox_final.json"
 TEMPERATURE=0.1

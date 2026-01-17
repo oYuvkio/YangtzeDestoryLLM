@@ -35,7 +35,7 @@ class ModelConfig:
     """
     model_path: str = "/hy-tmp/zjx/models/modelscope/wenge-research/yayi-uie"
     torch_dtype: str = "float16"
-    device_map: str = "auto"
+    device_map: str = "balanced_low_0"
     trust_remote_code: bool = True
     low_cpu_mem_usage: bool = True
     max_memory: Optional[Dict[int, str]] = None
@@ -43,11 +43,13 @@ class ModelConfig:
     temperature: float = 0.1
     do_sample: bool = False
     timeout: int = 180
-    
+    offload_folder: str = "/hy-tmp/zjx/offload"
+    cpu_max_memory: str = "48GiB"   # 无 swap 建议先 48GiB，后面再调
+    gpu_max_memory: str = "22GiB"   
+
     def __post_init__(self):
-        # 默认三卡配置
         if self.max_memory is None:
-            self.max_memory = {0: "22GiB", 1: "22GiB", 2: "22GiB"}
+            self.max_memory = {0: self.gpu_max_memory, 1: self.gpu_max_memory, 2: self.gpu_max_memory, "cpu": self.cpu_max_memory}
 
 
 @dataclass

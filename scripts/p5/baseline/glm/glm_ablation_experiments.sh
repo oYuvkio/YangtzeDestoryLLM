@@ -36,7 +36,7 @@ echo "已激活 Conda 环境: ${CONDA_ENV}"
 # =============================================================================
 # 配置区域（根据需要修改）
 # =============================================================================
-TEST_FILE="outputs/eval_models/gold/merge_filted_3.jsonl"
+TEST_FILE="outputs/eval_models/gold/merge_filted_2.jsonl"
 TEXT_SOURCE="data/corpus_for_kg/filtered_ytz_corpus/light_pool_v2_dedup.jsonl"
 TBOX="outputs/kg_final/tbox_final.json"
 MODEL="THUDM/GLM-4-9B-0414"

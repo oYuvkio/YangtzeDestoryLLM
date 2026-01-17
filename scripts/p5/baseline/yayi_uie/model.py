@@ -77,6 +77,13 @@ class ModelLoader:
             }
             if self.config.max_memory:
                 load_kwargs["max_memory"] = self.config.max_memory
+
+            import os
+            os.makedirs(self.config.offload_folder, exist_ok=True)
+            load_kwargs["offload_folder"] = self.config.offload_folder
+            load_kwargs["offload_state_dict"] = True
+            if self.config.max_memory:
+                load_kwargs["max_memory"] = self.config.max_memory
             
             # 加载模型
             self.model = AutoModelForCausalLM.from_pretrained(
