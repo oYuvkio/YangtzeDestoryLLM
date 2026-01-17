@@ -722,7 +722,7 @@ EXTRACT_PROMPT_TEMPLATE = """
         请严格遵循以下JSON格式输出：
         {{
             "entities": [
-                {{"name": "实体名", "type": "实体类型(如:灾害事件, 地点, 原因, 影响, 措施)"}}
+                {{"灾害事件": ["实体名"], "地点": ["实体名"], "原因": ["实体名"]}}
             ],
             "relations": [
                 {{"head": "头实体名", "relation": "关系(如:发生于, 导致, 影响, 应对)", "tail": "尾实体名"}}
@@ -998,11 +998,13 @@ P5_COT_EXTRACTION_PROMPT = """
 ```json
 {{
   "entities": [
-    {{"name": "2022年水文干旱过程", "type": "DroughtEvent"}},
-    {{"name": "城陵矶水文站", "type": "HydrologicalStation"}},
-    {{"name": "洞庭湖", "type": "Lake"}},
-    {{"name": "2022年7月8日", "type": "TemporalEntity"}},
-    {{"name": "抗旱Ⅳ级应急响应", "type": "EmergencyResponse"}}
+    {{
+      "DroughtEvent": ["2022年水文干旱过程"],
+      "HydrologicalStation": ["城陵矶水文站"],
+      "Lake": ["洞庭湖"],
+      "TemporalEntity": ["2022年7月8日"],
+      "EmergencyResponse": ["抗旱Ⅳ级应急响应"]
+    }}
   ],
   "triples": [
     {{"subject": "城陵矶水文站", "predicate": "monitors_river", "object": "洞庭湖", "evidence": "洞庭湖水系出口控制站岳阳城陵矶水文站"}},
@@ -1023,10 +1025,12 @@ P5_COT_EXTRACTION_PROMPT = """
 ```json
 {{
   "entities": [
-    {{"name": "无为", "type": "GeographicRegion"}},
-    {{"name": "乾隆五十年(1785年)奇旱", "type": "DroughtEvent"}},
-    {{"name": "水灾", "type": "DisasterEvent"}},
-    {{"name": "大饥", "type": "DisasterImpact"}}
+    {{
+      "GeographicRegion": ["无为"],
+      "DroughtEvent": ["乾隆五十年(1785年)奇旱"],
+      "DisasterEvent": ["水灾"],
+      "DisasterImpact": ["大饥"]
+    }}
   ],
   "triples": [
     {{"subject": "水灾", "predicate": "affects_region", "object": "无为", "evidence": "其中水灾达60次"}},
@@ -1395,12 +1399,14 @@ UNIFIED_EXTRACTION_PROMPT = """你是一名水旱灾害领域知识图谱构建�
 ```json
 {{
   "entities": [
-    {{"name": "2022年水文干旱过程", "type": "DroughtEvent"}},
-    {{"name": "城陵矶水文站", "type": "HydrologicalStation"}},
-    {{"name": "洞庭湖", "type": "Lake"}},
-    {{"name": "2022年7月8日", "type": "TemporalEntity"}},
-    {{"name": "抗旱Ⅳ级应急响应", "type": "EmergencyResponse"}},
-    {{"name": "24.50 m", "type": "NumericValue"}}
+    {{
+      "DroughtEvent": ["2022年水文干旱过程"],
+      "HydrologicalStation": ["城陵矶水文站"],
+      "Lake": ["洞庭湖"],
+      "TemporalEntity": ["2022年7月8日"],
+      "EmergencyResponse": ["抗旱Ⅳ级应急响应"],
+      "NumericValue": ["24.50 m"]
+    }}
   ],
   "events": [
     {{
@@ -1511,7 +1517,7 @@ UNIFIED_EXTRACTION_PROMPT = """你是一名水旱灾害领域知识图谱构建�
 <JSON>
 {{
   "entities": [
-    {{"name": "1998年", "type": "DisasterEvent"}}
+    {{"DisasterEvent": ["1998年"]}}
   ],
   "triples": [
     {{
@@ -1528,9 +1534,11 @@ UNIFIED_EXTRACTION_PROMPT = """你是一名水旱灾害领域知识图谱构建�
 <JSON>
 {{
   "entities": [
-    {{"name": "1998年", "type": "TemporalEntity"}},
-    {{"name": "长江流域", "type": "Basin"}},
-    {{"name": "严重的洪涝灾害", "type": "DisasterEvent"}}
+    {{
+      "TemporalEntity": ["1998年"],
+      "Basin": ["长江流域"],
+      "DisasterEvent": ["严重的洪涝灾害"]
+    }}
   ],
   "triples": [
     {{
@@ -1585,7 +1593,7 @@ Step 5: 证据标注与置信度
 <JSON>
 {{
   "entities": [
-    {{"name": "实体名（必须是原文子串）", "type": "类型ID（英文）"}}
+    {{"类型ID（英文）": ["实体名（必须是原文子串）"]}}
   ],
   "events": [
     {{
@@ -1701,12 +1709,14 @@ UNIFIED_USER_PROMPT_COT = """请从以下文本中抽取实体和关系三元组
 ```json
 {{{{
   "entities": [
-    {{{{"name": "2022年水文干旱过程", "type": "DroughtEvent"}}}},
-    {{{{"name": "城陵矶水文站", "type": "HydrologicalStation"}}}},
-    {{{{"name": "洞庭湖", "type": "Lake"}}}},
-    {{{{"name": "2022年7月8日", "type": "TemporalEntity"}}}},
-    {{{{"name": "抗旱Ⅳ级应急响应", "type": "EmergencyResponse"}}}},
-    {{{{"name": "24.50 m", "type": "NumericValue"}}}}
+    {{{{
+      "DroughtEvent": ["2022年水文干旱过程"],
+      "HydrologicalStation": ["城陵矶水文站"],
+      "Lake": ["洞庭湖"],
+      "TemporalEntity": ["2022年7月8日"],
+      "EmergencyResponse": ["抗旱Ⅳ级应急响应"],
+      "NumericValue": ["24.50 m"]
+    }}}}
   ],
   "events": [
     {{{{
@@ -1790,7 +1800,7 @@ UNIFIED_USER_PROMPT_COT = """请从以下文本中抽取实体和关系三元组
 **❌ 错误输出**：
 ```json
 {{{{
-  "entities": [{{{{"name": "1998年", "type": "DisasterEvent"}}}}],
+  "entities": [{{{{"DisasterEvent": ["1998年"]}}}}],
   "triples": [{{{{"subject": "1998年", "predicate": "affects_region", "object": "长江流域"}}}}]
 }}}}
 ```
@@ -1800,9 +1810,11 @@ UNIFIED_USER_PROMPT_COT = """请从以下文本中抽取实体和关系三元组
 ```json
 {{{{
   "entities": [
-    {{{{"name": "1998年", "type": "TemporalEntity"}}}},
-    {{{{"name": "长江流域", "type": "Basin"}}}},
-    {{{{"name": "严重的洪涝灾害", "type": "DisasterEvent"}}}}
+    {{{{
+      "TemporalEntity": ["1998年"],
+      "Basin": ["长江流域"],
+      "DisasterEvent": ["严重的洪涝灾害"]
+    }}}}
   ],
   "triples": [
     {{{{"subject": "严重的洪涝灾害", "predicate": "affects_region", "object": "长江流域", "evidence": "长江流域发生了严重的洪涝灾害", "confidence": "high"}}}},
@@ -1862,7 +1874,7 @@ UNIFIED_USER_PROMPT_COT = """请从以下文本中抽取实体和关系三元组
 ```json
 {{{{
   "entities": [
-    {{{{"name": "实体名（必须是原文子串）", "type": "知识图谱Schema中的类型"}}}}
+    {{{{"知识图谱Schema中的类型": ["实体名（必须是原文子串）"]}}}}
   ],
   "events": [
     {{{{

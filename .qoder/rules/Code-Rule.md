@@ -88,48 +88,7 @@ trigger: manual
 1. 需要使用中文与我对话
 2. 在git提交的时候生成的注释需要使用中文
 
-## OCR/Paddle 服务踩坑总结（必读）
 
-### 1. 环境与依赖（Torch/NCCL）
-1. 不要在 `~/.bashrc` 里全局写死 `LD_LIBRARY_PATH=/usr/local/cuda/lib*`，容易让旧版 NCCL 抢先被加载，触发 `libtorch_cuda.so: undefined symbol: ncclGroupSimulateEnd` 之类错误（`import torch`/`paddleocr` 直接失败）。
-2. 如必须设置 CUDA 路径，优先保证 conda 环境的 `$CONDA_PREFIX/lib` 在前，或临时 `env -u LD_LIBRARY_PATH ...` 运行命令。
-
-### 2. PaddleOCR Serving 接口关键点（layout-parsing）
-1. 服务端接口：`POST /layout-parsing`，请求/响应为 JSON，成功返回 `errorCode=0`。
-2. `file` 字段支持两类输入：
-   - **URL**（服务端可访问的 http/https 地址）
-   - **Base64**（文件内容 base64 编码）
-3. 不要把“本地文件路径字符串”直接填到 `file`（尤其包含中文/空格），服务端可能会按 base64 解码，导致 `500` 并出现：
-   - `ValueError: string argument should contain only ASCII characters`
-4. 如需本地文件解析，推荐使用 base64 上传；或先把文件放到一个服务端可访问的静态文件服务，再用 URL 方式。
-
-### 3. 代理导致的“端口可用但连接被拒绝”
-1. `urllib` 默认会读取环境变量 `http_proxy/https_proxy`，即使是 `localhost/127.0.0.1` 也可能被代理劫持，表现为 `Connection refused`（实际上在连代理端口）。
-2. 处理方式：
-   - 对本地服务请求默认禁用代理；或设置 `NO_PROXY=localhost,127.0.0.1,::1`；
-   - 必须走代理访问远端服务时再显式启用代理。
-
-### 4. `tools/paddle_ocr.py` 使用规范（批处理 + 缓存 + 并发）
-1. 推荐命令（服务端模式）：
-   - `python tools/paddle_ocr.py --runner server --workers 4 --skip-existing --retry-failed`
-2. 关键参数说明：
-   - `--api-url`：服务端地址（默认 `http://127.0.0.1:8123/layout-parsing`）
-   - `--file-mode`：默认 `auto`（优先 base64，避免路径触发服务端 base64 解码错误）
-   - `--proxy-mode`：默认 `auto`（本地服务禁用代理；远端按环境代理）
-   - `--timeout-secs`：默认 `1800`，用于长文档处理
-   - `--retry-failed`：重试缓存中失败项
-3. 缓存文件：默认 `logs/ocr/paddleocr_cache.jsonl`（启动时会加载，支持断点续跑）。
-4. 失败状态区分（写入缓存的 `status`）：
-   - `failed_timeout`：请求超时（不重试）
-   - `failed_parse`：解析错误（最多重试 2 次）
-   - `failed_unavailable`：服务不可用/连接拒绝（默认不写缓存，避免污染；需要时加 `--cache-unavailable`）
-   - `failed_other`：其他错误
-5. 并发安全：
-   - server 模式可多线程并发请求；
-   - local 模式（PaddleOCRVL 本地推理）非线程安全，强制单线程。
-6. 资源与稳定性：
-   - base64 会把 PDF 读入内存并上传，大文件建议降低 `--workers`（如 1~2）。
-   - 服务端模型提示 “batch size only supports 1” 属正常现象，但会影响吞吐。
 
 ### 5. 不保存图片/去除图片引用
 1. OCR 输出 Markdown 中常包含 `imgs/...` 图片引用；如果不需要图片，应在写出前移除引用，并在处理结束后统一清理 `output_root/**/imgs/`（避免并发竞态）。
@@ -465,88 +424,6 @@ feat: 实现 P4 支持度聚合机制
 
 ### 9. 文档规范
 
-#### 9.1 代码文档字符串
-```python
-def extract_events(
-    self, 
-    paragraph: str, 
-    schema: TBoxSchema, 
-    save_path: Optional[Path] = None
-) -> Dict[str, Any]:
-    """
-    从段落中抽取灾害事件和三元组。
-    
-    Args:
-        paragraph: 待抽取的文本段落
-        schema: TBox 模式（约束抽取范围）
-        save_path: 可选的结果保存路径
-        
-    Returns:
-        包含 events 和 triples 的字典
-        
-    Raises:
-        ValueError: 当 paragraph 为空时
-        
-    示例:
-        >>> result = client.extract_events(text, schema)
-        >>> print(len(result["events"]))
-    """
-    pass
-```
-
-#### 9.2 模块级文档
-每个 Python 文件顶部添加模块说明：
-```python
-"""
-TBox 指标计算模块。
-
-实现 OntoQA 框架的核心指标：
-- RR (Relationship Richness): 关系丰富度
-- IR (Inheritance Richness): 继承丰富度  
-- AR (Attribute Richness): 属性丰富度
-
-用法:
-    from tools.tbox_metrics import compute_tbox_metrics
-    metrics = compute_tbox_metrics(tbox)
-"""
-```
-
-### 10. 安全注意事项
-
-#### 10.1 输入验证
-```python
-# ✅ 验证路径安全性
-def safe_load_json(path: str) -> dict:
-    path = Path(path).resolve()
-    if not path.is_file():
-        raise FileNotFoundError(f"文件不存在: {path}")
-    if path.suffix != ".json":
-        raise ValueError("仅支持 .json 文件")
-    with open(path) as f:
-        return json.load(f)
-```
-
-#### 10.2 避免命令注入
-```python
-# ❌ 危险做法
-os.system(f"rm {user_input}")  # 可能导致命令注入
-
-# ✅ 安全做法
-from pathlib import Path
-Path(user_input).unlink(missing_ok=True)
-```
-
-#### 10.3 大文件处理
-- 设置文件大小限制（避免 OOM）
-- 使用流式处理大文件
-- 添加超时机制
-
-```python
-# ✅ 检查文件大小
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
-if Path(path).stat().st_size > MAX_FILE_SIZE:
-    raise ValueError(f"文件过大: {path}")
-```
 
 ### 11. 数据处理与评测流程规范（重要）
 

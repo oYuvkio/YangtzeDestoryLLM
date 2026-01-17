@@ -63,6 +63,11 @@ REL_MAPPING=""
 USER_PRED_FILE=""  # 用户指定的预测文件（跳过抽取步骤）
 EVAL_ONLY=false  # 仅评估模式
 
+# 归一化控制参数（默认关闭，实现原始对比模式）
+ENABLE_ENTITY_NORMALIZE=false    # 实体同义词归一化
+ENABLE_DIRECTION_NORMALIZE=false # 三元组方向归一化
+ENABLE_TYPE_FALLBACK=false       # TBox 类型回退
+
 # 解析命令行参数
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -134,6 +139,18 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_BASE="$2"
             shift 2
             ;;
+        --enable-entity-normalize)
+            ENABLE_ENTITY_NORMALIZE=true
+            shift
+            ;;
+        --enable-direction-normalize)
+            ENABLE_DIRECTION_NORMALIZE=true
+            shift
+            ;;
+        --enable-type-fallback)
+            ENABLE_TYPE_FALLBACK=true
+            shift
+            ;;
         --help)
             echo "使用方式:"
             echo "  --model       模型名称（必须）"
@@ -153,6 +170,14 @@ while [[ $# -gt 0 ]]; do
             echo "  --test-file   测试集文件路径"
             echo "  --text-source 完整文本来源文件（可选，用于映射 doc_id 获取完整文本）"
             echo "  --output-base 输出基目录"
+            echo ""
+            echo "归一化控制参数（默认关闭）:"
+            echo "  --enable-entity-normalize    启用实体同义词归一化（默认关闭）"
+            echo "  --enable-direction-normalize 启用三元组方向归一化（默认关闭）"
+            echo "  --enable-type-fallback       启用 TBox 类型回退（默认关闭）"
+            echo ""
+            echo "说明: 默认情况下不做任何归一化，直接对比原始 pred 和 gold 数据。"
+            echo "      如需启用归一化，请显式指定对应参数。"
             exit 0
             ;;
         *)
@@ -359,77 +384,84 @@ if [ -n "$REL_MAPPING" ]; then
     PRED_FOR_NORM="$MAPPED_PRED"
 fi
 
-# Step 2.3: 实体同义词归一化（第二步）
-echo ""
-echo "[Step 2.3] 实体同义词归一化..."
+# Step 2.3: 实体同义词归一化（第二步）- 仅当启用时执行
 SYNONYMS_FILE="configs/entity_synonyms.json"
 GOLD_ENTITY_NORM="$OUT_DIR/gold_entity_normalized.jsonl"
 PRED_ENTITY_NORM="$OUT_DIR/predictions_entity_normalized.jsonl"
-if [ -f "$SYNONYMS_FILE" ]; then
-    python scripts/p5/normalize_entities.py \
-        --gold "$GOLD_FOR_NORM" \
-        --pred "$PRED_FOR_NORM" \
-        --synonyms "$SYNONYMS_FILE" \
-        --gold-out "$GOLD_ENTITY_NORM" \
-        --pred-out "$PRED_ENTITY_NORM"
-    GOLD_FOR_DIRECTION="$GOLD_ENTITY_NORM"
-    PRED_FOR_DIRECTION="$PRED_ENTITY_NORM"
+if [ "$ENABLE_ENTITY_NORMALIZE" = true ]; then
+    echo ""
+    echo "[Step 2.3] 实体同义词归一化..."
+    if [ -f "$SYNONYMS_FILE" ]; then
+        python scripts/p5/normalize_entities.py \
+            --gold "$GOLD_FOR_NORM" \
+            --pred "$PRED_FOR_NORM" \
+            --synonyms "$SYNONYMS_FILE" \
+            --gold-out "$GOLD_ENTITY_NORM" \
+            --pred-out "$PRED_ENTITY_NORM"
+        GOLD_FOR_DIRECTION="$GOLD_ENTITY_NORM"
+        PRED_FOR_DIRECTION="$PRED_ENTITY_NORM"
+    else
+        echo "  [警告] 同义词库不存在: $SYNONYMS_FILE，跳过实体归一化"
+        GOLD_FOR_DIRECTION="$GOLD_FOR_NORM"
+        PRED_FOR_DIRECTION="$PRED_FOR_NORM"
+    fi
 else
-    echo "  同义词库不存在，跳过实体归一化"
+    echo ""
+    echo "[Step 2.3] 跳过实体同义词归一化（未启用 --enable-entity-normalize）"
     GOLD_FOR_DIRECTION="$GOLD_FOR_NORM"
     PRED_FOR_DIRECTION="$PRED_FOR_NORM"
 fi
 
-# Step 2.4: 三元组方向归一化（最后做 - 基于已归一化的关系和实体判断方向）
-echo ""
-echo "[Step 2.4] 三元组方向归一化..."
+# Step 2.4: 三元组方向归一化（最后做）- 仅当启用时执行
 GOLD_NORMALIZED="$OUT_DIR/gold_normalized.jsonl"
 PRED_NORMALIZED="$OUT_DIR/predictions_normalized.jsonl"
-python scripts/p5/normalize_triple_direction.py \
-    --gold "$GOLD_FOR_DIRECTION" \
-    --pred "$PRED_FOR_DIRECTION" \
-    --tbox "$TBOX" \
-    --gold-out "$GOLD_NORMALIZED" \
-    --pred-out "$PRED_NORMALIZED"
+if [ "$ENABLE_DIRECTION_NORMALIZE" = true ]; then
+    echo ""
+    echo "[Step 2.4] 三元组方向归一化..."
+    python scripts/p5/normalize_triple_direction.py \
+        --gold "$GOLD_FOR_DIRECTION" \
+        --pred "$PRED_FOR_DIRECTION" \
+        --tbox "$TBOX" \
+        --gold-out "$GOLD_NORMALIZED" \
+        --pred-out "$PRED_NORMALIZED"
+    GOLD_FOR_METRICS="$GOLD_NORMALIZED"
+    PRED_FOR_METRICS="$PRED_NORMALIZED"
+else
+    echo ""
+    echo "[Step 2.4] 跳过三元组方向归一化（未启用 --enable-direction-normalize）"
+    GOLD_FOR_METRICS="$GOLD_FOR_DIRECTION"
+    PRED_FOR_METRICS="$PRED_FOR_DIRECTION"
+fi
 
-# 设置最终用于评测的文件
-GOLD_FOR_METRICS="$GOLD_NORMALIZED"
-PRED_FOR_METRICS="$PRED_NORMALIZED"
-
-# Step 3: 评测（不做归一化的原始指标）
+# Step 3: 评测（原始对比模式 - 使用过滤后的文件，不做归一化）
 echo ""
-echo "[Step 3] 计算原始指标（不做归一化）..."
-METRICS_NO_NORM_FILE="$OUT_DIR/metrics_no_normalize.json"
-METRICS_NO_NORM_RAW_FILE="$OUT_DIR/metrics_no_normalize_raw.json"
-python tools/abox_metrics.py \
-    --gold "$GOLD_FILTERED" \
-    --pred "$PRED_FILTERED" \
-    --tbox "$TBOX" \
-    --out "$METRICS_NO_NORM_FILE"
+echo "[Step 3] 计算指标..."
 
-python tools/abox_metrics.py \
-    --gold "$GOLD_FILTERED" \
-    --pred "$PRED_FILTERED" \
-    --tbox "$TBOX" \
-    --use-original-type \
-    --out "$METRICS_NO_NORM_RAW_FILE"
+# 构建 abox_metrics.py 的类型回退参数
+TYPE_FALLBACK_FLAG=""
+if [ "$ENABLE_TYPE_FALLBACK" = true ]; then
+    TYPE_FALLBACK_FLAG=""  # 启用类型回退（abox_metrics.py 默认行为）
+else
+    TYPE_FALLBACK_FLAG="--use-original-type"  # 使用原始类型（不回退）
+fi
 
-# Step 4: 评测（归一化后的指标）
-echo ""
-echo "[Step 4] 计算归一化后指标..."
+# 主指标文件（使用归一化后的文件，如果启用了归一化）
 python tools/abox_metrics.py \
     --gold "$GOLD_FOR_METRICS" \
     --pred "$PRED_FOR_METRICS" \
     --tbox "$TBOX" \
+    $TYPE_FALLBACK_FLAG \
     --out "$METRICS_FILE"
 
-# Step 4.1: 原始类型评测（忽略回退逻辑）
-python tools/abox_metrics.py \
-    --gold "$GOLD_FOR_METRICS" \
-    --pred "$PRED_FOR_METRICS" \
-    --tbox "$TBOX" \
-    --use-original-type \
-    --out "$METRICS_RAW_FILE"
+# 如果启用了类型回退，同时输出原始类型指标
+if [ "$ENABLE_TYPE_FALLBACK" = true ]; then
+    python tools/abox_metrics.py \
+        --gold "$GOLD_FOR_METRICS" \
+        --pred "$PRED_FOR_METRICS" \
+        --tbox "$TBOX" \
+        --use-original-type \
+        --out "$METRICS_RAW_FILE"
+fi
 
 # Step 4.2: 诊断报告
 echo ""
@@ -454,29 +486,36 @@ if [ -n "$REL_MAPPING" ]; then
 else
     echo "  关系映射:         ❌ 未启用"
 fi
-if [ -f "$SYNONYMS_FILE" ]; then
+if [ "$ENABLE_ENTITY_NORMALIZE" = true ]; then
     echo "  实体同义词归一化: ✅ 已启用"
 else
     echo "  实体同义词归一化: ❌ 未启用"
 fi
-echo "  三元组方向归一化: ✅ 已启用"
-echo "  TBox类型回退:     ✅ 已启用（同时输出原始类型指标）"
+if [ "$ENABLE_DIRECTION_NORMALIZE" = true ]; then
+    echo "  三元组方向归一化: ✅ 已启用"
+else
+    echo "  三元组方向归一化: ❌ 未启用"
+fi
+if [ "$ENABLE_TYPE_FALLBACK" = true ]; then
+    echo "  TBox类型回退:     ✅ 已启用"
+else
+    echo "  TBox类型回退:     ❌ 未启用（使用原始类型）"
+fi
 echo ""
-echo "【归一化文件】"
+echo "【评测文件】"
+echo "  Gold 文件:    $GOLD_FOR_METRICS"
+echo "  Pred 文件:    $PRED_FOR_METRICS"
 if [ -n "$REL_MAPPING" ]; then
     echo "  关系映射配置: $REL_MAPPING"
 fi
-if [ -f "$SYNONYMS_FILE" ]; then
+if [ "$ENABLE_ENTITY_NORMALIZE" = true ] && [ -f "$SYNONYMS_FILE" ]; then
     echo "  实体同义词库: $SYNONYMS_FILE"
 fi
-echo "  归一化Gold:   $GOLD_NORMALIZED"
-echo "  归一化Pred:   $PRED_NORMALIZED"
-echo "  诊断报告:     $DIAGNOSIS_FILE"
 
-# 显示指标摘要（新格式：包含 raw 和 tbox_filtered 两个版本）
+# 显示指标摘要
 if [ -f "$METRICS_FILE" ]; then
     echo ""
-    echo "指标摘要（回退逻辑）:"
+    echo "指标摘要:"
     python3 -c "
 import json
 with open('$METRICS_FILE') as f:
@@ -588,124 +627,12 @@ else:
 "
 fi
 
-if [ -f "$METRICS_RAW_FILE" ]; then
-    echo ""
-    echo "指标摘要（原始类型）:"
-    python3 -c "
-import json
-with open('$METRICS_RAW_FILE') as f:
-    data = json.load(f)
-
-# 检查是否为新格式
-if 'raw' in data and 'tbox_filtered' in data:
-    for version in ['raw', 'tbox_filtered']:
-        m = data[version]
-        print(f'')
-        print(f'  === {version.upper()} ===')
-
-        em = m.get('event_metrics', {})
-        print(f'  [Event]')
-        print(f'    Precision:      {em.get(\"precision\", 0):.4f}')
-        print(f'    Recall:         {em.get(\"recall\", 0):.4f}')
-        print(f'    F1:             {em.get(\"f1\", 0):.4f}')
-
-        ts = m.get('triple_metrics_strict', {})
-        print(f'  [Triple-Strict]')
-        print(f'    Precision:      {ts.get(\"precision\", 0):.4f}')
-        print(f'    Recall:         {ts.get(\"recall\", 0):.4f}')
-        print(f'    F1:             {ts.get(\"f1\", 0):.4f}')
-
-        tr = m.get('triple_metrics_relaxed', {})
-        print(f'  [Triple-Relaxed]')
-        print(f'    Precision:      {tr.get(\"precision\", 0):.4f}')
-        print(f'    Recall:         {tr.get(\"recall\", 0):.4f}')
-        print(f'    F1:             {tr.get(\"f1\", 0):.4f}')
-
-        # 实体指标（仅名称匹配）
-        ent = m.get('entity_metrics', {})
-        print(f'  [Entity (name only)]')
-        print(f'    Precision:      {ent.get(\"precision\", 0):.4f}')
-        print(f'    Recall:         {ent.get(\"recall\", 0):.4f}')
-        print(f'    F1:             {ent.get(\"f1\", 0):.4f}')
-
-        # 实体指标（名称+类型匹配）
-        ent_type = m.get('entity_metrics_with_type', {})
-        if ent_type:
-            print(f'  [Entity (name+type)]')
-            print(f'    Precision:      {ent_type.get(\"precision\", 0):.4f}')
-            print(f'    Recall:         {ent_type.get(\"recall\", 0):.4f}')
-            print(f'    F1:             {ent_type.get(\"f1\", 0):.4f}')
-
-        # 关系指标
-        rel = m.get('relation_metrics', {})
-        print(f'  [Relation]')
-        print(f'    Precision:      {rel.get(\"precision\", 0):.4f}')
-        print(f'    Recall:         {rel.get(\"recall\", 0):.4f}')
-        print(f'    F1:             {rel.get(\"f1\", 0):.4f}')
-
-        print(f'  [Quality]')
-        print(f'    TBox Consistency:   {m.get(\"tbox_consistency\", 0):.4f}')
-        hr = m.get('hallucination_rate')
-        print(f'    Hallucination Rate: {hr:.4f}' if hr is not None else '    Hallucination Rate: N/A')
-        print(f'    Entity Redundancy:  {m.get(\"entity_redundancy_rate\", 0):.4f}')
-else:
-    m = data
-    em = m.get('event_metrics', {})
-    print(f'  [Event]')
-    print(f'    Precision:      {em.get(\"precision\", 0):.4f}')
-    print(f'    Recall:         {em.get(\"recall\", 0):.4f}')
-    print(f'    F1:             {em.get(\"f1\", 0):.4f}')
-
-    ts = m.get('triple_metrics_strict', {})
-    print(f'  [Triple-Strict]')
-    print(f'    Precision:      {ts.get(\"precision\", 0):.4f}')
-    print(f'    Recall:         {ts.get(\"recall\", 0):.4f}')
-    print(f'    F1:             {ts.get(\"f1\", 0):.4f}')
-
-    tr = m.get('triple_metrics_relaxed', {})
-    print(f'  [Triple-Relaxed]')
-    print(f'    Precision:      {tr.get(\"precision\", 0):.4f}')
-    print(f'    Recall:         {tr.get(\"recall\", 0):.4f}')
-    print(f'    F1:             {tr.get(\"f1\", 0):.4f}')
-
-    # 实体指标（仅名称匹配）
-    ent = m.get('entity_metrics', {})
-    print(f'  [Entity (name only)]')
-    print(f'    Precision:      {ent.get(\"precision\", 0):.4f}')
-    print(f'    Recall:         {ent.get(\"recall\", 0):.4f}')
-    print(f'    F1:             {ent.get(\"f1\", 0):.4f}')
-
-    # 实体指标（名称+类型匹配）
-    ent_type = m.get('entity_metrics_with_type', {})
-    if ent_type:
-        print(f'  [Entity (name+type)]')
-        print(f'    Precision:      {ent_type.get(\"precision\", 0):.4f}')
-        print(f'    Recall:         {ent_type.get(\"recall\", 0):.4f}')
-        print(f'    F1:             {ent_type.get(\"f1\", 0):.4f}')
-
-    # 关系指标
-    rel = m.get('relation_metrics', {})
-    print(f'  [Relation]')
-    print(f'    Precision:      {rel.get(\"precision\", 0):.4f}')
-    print(f'    Recall:         {rel.get(\"recall\", 0):.4f}')
-    print(f'    F1:             {rel.get(\"f1\", 0):.4f}')
-
-    print(f'  [Quality]')
-    print(f'    TBox Consistency:   {m.get(\"tbox_consistency\", 0):.4f}')
-    print(f'    Hallucination Rate: {m.get(\"hallucination_rate\", 0):.4f}')
-    print(f'    Entity Redundancy:  {m.get(\"entity_redundancy_rate\", 0):.4f}')
-"
-fi
-
 echo ""
 echo "【输出文件】"
 echo "  预测结果:     $PRED_FILE"
 echo "  对齐结果:     $ALIGNED_FILE"
-echo ""
-echo "  --- 不做归一化 ---"
-echo "  指标(回退):   $METRICS_NO_NORM_FILE"
-echo "  指标(原始):   $METRICS_NO_NORM_RAW_FILE"
-echo ""
-echo "  --- 归一化后 ---"
-echo "  指标(回退):   $METRICS_FILE"
-echo "  指标(原始):   $METRICS_RAW_FILE"
+echo "  主指标文件:   $METRICS_FILE"
+if [ "$ENABLE_TYPE_FALLBACK" = true ]; then
+    echo "  原始类型指标: $METRICS_RAW_FILE"
+fi
+echo "  诊断报告:     $DIAGNOSIS_FILE"

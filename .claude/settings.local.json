@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc:*)",
+      "Bash(head:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(tree:*)",
+      "Bash(chmod:*)",
+      "Bash(python:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(bash:*)",
+      "Bash(python3:*)",
+      "Bash(source:*)",
+      "Bash(conda activate:*)",
+      "Bash(pip uninstall:*)",
+      "Bash(pip install:*)",
+      "Bash(find:*)",
+      "Bash(git stash:*)",
+      "Bash(conda run:*)"
+    ]
+  }
+}

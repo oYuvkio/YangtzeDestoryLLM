@@ -43,13 +43,13 @@ BASE_URL="https://api.siliconflow.cn/v1/"
 OUTPUT_BASE="outputs/eval_models_hybrid/qwen/"
 
 #不改
-TEST_FILE="outputs/fusion/aggregate_filtered/glm/forward/pred_filtered.jsonl"
+TEST_FILE="outputs/eval_models/gold/merge_filted_3.jsonl"
 TEXT_SOURCE="data/corpus_for_kg/filtered_ytz_corpus/light_pool_v2_dedup.jsonl"
 TBOX="outputs/kg_final/tbox_final.json"
 TEMPERATURE=0.1
 TOP_P=0.1
 FUZZY_THRESHOLD=0.75
-INTERVAL=10
+INTERVAL=5
 
 
 # =============================================================================

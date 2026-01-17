@@ -108,6 +108,22 @@ def _collect_entities(
     return _dedup_entities(entities)
 
 
+def _group_entities_by_type(entities: List[Dict[str, Any]]) -> List[Dict[str, List[str]]]:
+    """按类型分组实体，输出为 {type: [name]} 的列表结构。"""
+    grouped: Dict[str, List[str]] = {}
+    for item in entities:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        etype = str(item.get("type", "")).strip()
+        if not name:
+            continue
+        names = grouped.setdefault(etype, [])
+        if name not in names:
+            names.append(name)
+    return [grouped] if grouped else []
+
+
 def build_extraction_record(
     doc_id: str,
     source_text: str,
@@ -182,8 +198,9 @@ def build_extraction_record(
 
     entities_from_result = _ensure_list(extraction_result.get("entities"))
     entities = _collect_entities(entities_from_result, events, triples)
+    grouped_entities = _group_entities_by_type(entities)
 
-    record["entities"] = entities
+    record["entities"] = grouped_entities
     record["events"] = events
     record["triples"] = triples
     record["filtered_triples"] = filtered_triples

@@ -1,190 +1,102 @@
-基于你的 v4 Pipeline，我来帮你设计一套完整的消融实验方案，检验各个模块的贡献。
+根据上下文，我需要先读取相关文件，然后给出 `--no-graph` 参数的实现计划。
 
-## 消融实验设计
+我需要继续读取 `kg/cq_pipeline.py` 的剩余部分，特别是 `extract_events_with_verification` 方法：
 
-### 一、核心模块分解
+继续读取 `extract_events_with_verification` 方法的剩余部分：
 
-你的 Pipeline 有以下可消融的核心模块：
-
-| 模块 | 对应代码/参数 | 核心价值假设 |
-|------|--------------|-------------|
-| **图结构检测** | `get_graph_structure_for_text()` | 领域特定的图结构能提升抽取准确性 |
-| **CoT 推理** | `--no-cot` | 链式思维能减少幻觉、提升关系方向正确性 |
-| **原文回溯校验** | `--no-verify` | 过滤幻觉三元组 |
-| **模糊匹配** | `--strict-filter` vs `--fuzzy-threshold` | 宽松匹配能召回更多正确三元组 |
-| **Schema 约束** | `--strict-schema` vs `--no-strict-schema` | Schema 约束能保证关系合法性 |
-| **Hybrid TBox** | 不同 `--tbox` 文件 | 混合本体优于纯专家骨架 |
+现在我已经完全理解了代码结构。让我给出 `--no-graph` 参数的实现计划：
 
 ---
 
-### 二、推荐消融实验方案
+## `--no-graph` 参数实现计划
 
-#### 实验 1：ABox 抽取消融（固定 TBox，变 Pred 配置）
+### 背景分析
 
-这是**最重要**的消融，检验抽取链路各模块的价值：
+通过代码审查，我发现：
+- `--no-cot` 和 `--no-verify` 已在 `run_extraction_on_test.py` 中实现
+- 图结构检测逻辑在 `extract_events()` 和 `extract_events_with_verification()` 中，当 `use_cot=True` 时会调用 `get_graph_structure_for_text()` 进行文本类型检测
 
-| 变体 ID | 配置 | 检验目标 | 命令关键参数 |
-|---------|------|----------|-------------|
-| **full** | 图结构 + CoT + 后校验 + 模糊匹配 | 基准（完整系统） | 默认配置 |
-| **wo_cot** | 去掉 CoT | CoT 的价值 | `--no-cot` |
-| **wo_verify** | 去掉原文回溯校验 | 后校验的价值 | `--no-verify` |
-| **wo_graph** | 去掉图结构（用通用结构） | 图结构检测的价值 | 需新增参数 `--no-graph` |
-| **strict_match** | 严格匹配（禁用模糊） | 模糊匹配的价值 | `--strict-filter` |
-| **strict_schema** | 严格 Schema 约束 | Schema 宽松策略的价值 | `--strict-schema` |
+### 需要修改的文件
 
-**预期结论**：
-- `wo_cot`: Precision 下降（更多幻觉），关系方向错误增加
-- `wo_verify`: Precision 显著下降，幻觉率上升
-- `wo_graph`: 特定类型文本（如洪水事件）的 F1 下降
-- `strict_match`: Recall 下降（漏掉正确但有微小差异的实体）
-- `strict_schema`: Recall 下降（过滤掉部分合理但类型不完全匹配的三元组）
+| 文件 | 修改内容 |
+|------|----------|
+| `scripts/p5/run_extraction_on_test.py` | 添加 `--no-graph` 参数 |
+| `kg/cq_pipeline.py` | 在 `extract_events()` 和 `extract_events_with_verification()` 中添加 `use_graph` 参数 |
 
----
+### 详细修改方案
 
-#### 实验 2：TBox 消融（变 TBox，固定 Pred 配置）
-
-检验 Hybrid 本体构建的价值：
-
-| 变体 ID | TBox 来源 | 检验目标 |
-|---------|----------|----------|
-| **expert_only** | `data/expert_skeleton.json` | 纯专家骨架的效果 |
-| **hybrid_full** | `outputs/kg_final/tbox_final.json` | 完整 Hybrid TBox |
-| **hybrid_wo_filter** | 不做支持度/置信度筛选 | 质量筛选的价值 |
-
-**预期结论**：
-- `expert_only`: 覆盖率不足，部分实体/关系无法抽取
-- `hybrid_wo_filter`: 噪声类/关系增多，Precision 下降
-
----
-
-#### 实验 3：CoT 步骤消融（细粒度）
-
-如果 CoT 效果显著，可进一步分解：
-
-| 变体 ID | 配置 | 检验目标 |
-|---------|------|----------|
-| **cot_full** | 4 步完整 CoT | 基准 |
-| **cot_wo_step3** | 去掉 Step3（证据回溯） | 证据验证步骤的价值 |
-| **cot_wo_anchor** | 去掉 Step1 的锚点策略 | 锚点识别策略的价值 |
-
----
-
-### 三、实验执行命令
-
-```bash
-# 基准 (full)
-python scripts/p5/run_extraction_on_test.py \
-  --test-file data/p5_eval_pool/pool.jsonl \
-  --text-source data/corpus_for_kg/filtered_ytz_corpus/light_pool_v2_dedup.jsonl \
-  --tbox outputs/kg_final/tbox_final.json \
-  --model "gpt-4o-mini" \
-  --fuzzy-threshold 0.75 \
-  --no-strict-schema \
-  --output outputs/ablation/pred_full.jsonl
-
-# wo_cot
-python scripts/p5/run_extraction_on_test.py \
-  ... \
-  --no-cot \
-  --output outputs/ablation/pred_wo_cot.jsonl
-
-# wo_verify
-python scripts/p5/run_extraction_on_test.py \
-  ... \
-  --no-verify \
-  --output outputs/ablation/pred_wo_verify.jsonl
-
-# strict_match
-python scripts/p5/run_extraction_on_test.py \
-  ... \
-  --strict-filter \
-  --output outputs/ablation/pred_strict_match.jsonl
-
-# strict_schema
-python scripts/p5/run_extraction_on_test.py \
-  ... \
-  --strict-schema \
-  --output outputs/ablation/pred_strict_schema.jsonl
-
-# expert_only (TBox 消融)
-python scripts/p5/run_extraction_on_test.py \
-  ... \
-  --tbox data/expert_skeleton.json \
-  --output outputs/ablation/pred_expert_only.jsonl
-```
-
----
-
-### 四、评测指标
-
-对每个变体计算：
-
-| 指标类别 | 具体指标 | 说明 |
-|----------|----------|------|
-| **三元组质量** | Strict Triple F1 | 主语+谓词+宾语完全匹配 |
-| | Relaxed Triple F1 | 允许实体模糊匹配 |
-| **事件质量** | Event F1 | 事件识别准确率 |
-| **实体质量** | Entity F1 | 实体识别准确率 |
-| **幻觉统计** | Hallucination Rate | 被过滤的三元组比例 |
-| **Schema 一致性** | Predicate Accuracy | 谓词合法率 |
-| | Domain/Range Accuracy | 类型约束符合率 |
-| **关系方向** | Direction Accuracy | 关系方向正确率 |
-
----
-
-### 五、结果呈现建议
-
-#### 表格 1：ABox 消融实验结果
-
-| 变体 | Triple P | Triple R | Triple F1 | Event F1 | Halluc. Rate |
-|------|----------|----------|-----------|----------|--------------|
-| full | - | - | - | - | - |
-| wo_cot | ↓ | - | ↓ | ↓ | ↑ |
-| wo_verify | ↓↓ | ↑ | ↓ | - | ↑↑ |
-| wo_graph | - | - | ↓ | ↓ | - |
-| strict_match | ↑ | ↓↓ | ↓ | - | ↓ |
-| strict_schema | ↑ | ↓ | - | - | - |
-
-#### 表格 2：TBox 消融实验结果
-
-| TBox 变体 | Triple F1 | 覆盖类数 | 覆盖关系数 |
-|-----------|-----------|----------|------------|
-| expert_only | - | 少 | 少 |
-| hybrid_full | 最高 | 多 | 多 |
-
----
-
-### 六、需要新增的代码支持
-
-当前代码已支持大部分消融，但 **wo_graph** 需要新增参数：
+#### 1. `scripts/p5/run_extraction_on_test.py`
 
 ```python
-# 在 run_extraction_on_test.py 中添加
+# 在 --no-verify 后添加（约 147 行）
 parser.add_argument("--no-graph", action="store_true",
-                    help="禁用图结构检测，强制使用通用结构")
+                    help="禁用图结构检测（用于消融实验，默认开启图结构检测）")
 
-# 在 extract_events_with_verification 中修改
-if args.no_graph or not use_cot:
-    graph_structure = get_graph_structure("general_disaster")
-else:
-    graph_structure, type_id, confidence = get_graph_structure_for_text(paragraph)
+# 在 use_verify 定义后添加（约 170 行）
+use_graph = not args.no_graph
+
+# 修改 pipeline 调用（约 310 行和 318 行），传入 use_graph 参数
+res = pipeline.extract_events_with_verification(..., use_graph=use_graph)
+res = pipeline.extract_events(..., use_graph=use_graph)
+
+# 修改日志输出和元数据，添加 use_graph 字段
 ```
+
+#### 2. `kg/cq_pipeline.py`
+
+**`extract_events()` 方法（约 540 行）：**
+```python
+def extract_events(
+    self,
+    paragraph: str,
+    schema: TBoxSchema,
+    save_path: Optional[Path] = None,
+    favor_existing_classes: bool = True,
+    use_cot: bool = True,
+    use_graph: bool = True,  # 新增参数
+) -> Dict[str, Any]:
+```
+
+修改图结构检测逻辑：
+```python
+if use_cot:
+    if use_graph:
+        graph_structure, type_id, confidence = get_graph_structure_for_text(paragraph)
+        if confidence < GRAPH_TYPE_CONFIDENCE_THRESHOLD:
+            graph_structure = get_graph_structure("general_disaster")
+    else:
+        # 禁用图结构检测时，直接使用通用结构
+        graph_structure = get_graph_structure("general_disaster")
+        type_id = "general_disaster"
+    # ... 后续逻辑不变
+```
+
+**`extract_events_with_verification()` 方法（约 930 行）：**
+```python
+def extract_events_with_verification(
+    self,
+    paragraph: str,
+    schema: TBoxSchema,
+    ...,
+    use_cot: bool = True,
+    use_graph: bool = True,  # 新增参数
+    ...,
+) -> Dict[str, Any]:
+```
+
+同样修改图结构检测逻辑（约 980 行）。
+
+### 消融实验效果
+
+| 参数组合 | 效果 |
+|----------|------|
+| 默认（无参数） | 完整 Graph-CoT：文本类型检测 + 图结构驱动 CoT |
+| `--no-graph` | 禁用文本类型检测，统一使用 `general_disaster` 通用结构 |
+| `--no-cot` | 禁用 CoT，使用普通 P5_EXTRACTION_PROMPT |
+| `--no-graph --no-cot` | 完全禁用图结构和 CoT（最简基线） |
 
 ---
 
-### 七、优先级建议
+**请确认此计划是否可以开始实施？**
 
-**必做**（核心贡献验证）：
-1. `full` vs `wo_cot` — 验证 CoT 的价值
-2. `full` vs `wo_verify` — 验证后校验的价值
-3. `hybrid_full` vs `expert_only` — 验证 Hybrid TBox 的价值
 
-**推荐做**（完整性）：
-4. `full` vs `strict_match` — 验证模糊匹配策略
-5. `full` vs `wo_graph` — 验证图结构检测的价值
-
-**可选**（细粒度分析）：
-6. CoT 步骤消融
-7. 不同 fuzzy_threshold 的敏感性分析
-
-这样的消融实验设计能够清晰地展示你系统中每个模块的贡献，是论文评审非常看重的部分。

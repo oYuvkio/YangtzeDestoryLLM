@@ -15,4 +15,14 @@ BAAI/
 # OCR 临时文件
 nohup.out
 tools/ocr/nohup.out
-node_moudules/
+# Node deps
+node_modules/
+**/node_modules/
+
+# Bun
+bun.lock
+bun.lockb
+.bun/
+
+
+.kiro/**

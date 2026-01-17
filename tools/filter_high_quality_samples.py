@@ -16,6 +16,24 @@
         --event-threshold 0.3 \
         --sort-by avg \
         --export-scores scores.csv
+
+    # 允许实体和事件为空
+    python tools/filter_high_quality_samples.py \
+        --gold data/gold.jsonl \
+        --pred data/pred.jsonl \
+        --out data/filtered_gold.jsonl \
+        --allow-empty-entity --allow-empty-event
+
+    # 使用 --args 传递 JSON 配置
+    python tools/filter_high_quality_samples.py \
+        --gold data/gold.jsonl \
+        --pred data/pred.jsonl \
+        --out data/filtered_gold.jsonl \
+        --args '{"top_n": 500, "entity_threshold": 0.5}'
+
+    # 使用 --args 从文件加载配置
+    python tools/filter_high_quality_samples.py \
+        --args @config.json
 """
 from __future__ import annotations
 
@@ -86,6 +104,45 @@ def count_empty_dimensions(gold_record: Dict[str, Any]) -> int:
         empty_count += 1
     
     return empty_count
+
+
+def check_empty_dimensions_allowed(
+    gold_record: Dict[str, Any],
+    allow_empty_entity: bool = True,
+    allow_empty_triple: bool = True,
+    allow_empty_event: bool = True,
+) -> bool:
+    """
+    检查样本的空维度是否符合允许规则
+    
+    Args:
+        gold_record: Gold 标注记录
+        allow_empty_entity: 是否允许实体为空
+        allow_empty_triple: 是否允许三元组为空
+        allow_empty_event: 是否允许事件为空
+    
+    Returns:
+        True 如果符合空值允许规则，否则 False
+    """
+    # 检查实体
+    if not allow_empty_entity:
+        entities = gold_record.get("entities", []) or []
+        if not entities:
+            return False
+    
+    # 检查三元组
+    if not allow_empty_triple:
+        triples = gold_record.get("triples", []) or gold_record.get("gold_triples", []) or []
+        if not triples:
+            return False
+    
+    # 检查事件
+    if not allow_empty_event:
+        events = gold_record.get("events", []) or gold_record.get("gold_events", []) or []
+        if not events:
+            return False
+    
+    return True
 
 
 def setup_logger(log_file: Optional[str] = None) -> logging.Logger:
@@ -275,6 +332,9 @@ def filter_high_quality_samples(
     sort_by: str = "avg",
     skip_missing: bool = True,
     max_empty_dimensions: int = 3,
+    allow_empty_entity: bool = True,
+    allow_empty_triple: bool = True,
+    allow_empty_event: bool = True,
 ) -> Tuple[List[SampleScore], List[SampleScore]]:
     """
     筛选高质量样本
@@ -289,6 +349,9 @@ def filter_high_quality_samples(
         sort_by: 排序维度 (entity/triple/event/avg)
         skip_missing: 缺失维度是否跳过
         max_empty_dimensions: 允许的最大空维度数量 (0-3)，默认 3 表示不限制
+        allow_empty_entity: 是否允许实体为空
+        allow_empty_triple: 是否允许三元组为空
+        allow_empty_event: 是否允许事件为空
     
     Returns:
         (all_scores, filtered_scores): 所有样本评分和筛选后的评分
@@ -357,6 +420,23 @@ def filter_high_quality_samples(
         before_count = len(filtered_scores)
         filtered_scores = [s for s in filtered_scores if s.empty_dimensions <= max_empty_dimensions]
         logger.info(f"空维度筛选 (max_empty={max_empty_dimensions}): {len(filtered_scores)}/{before_count}")
+    
+    # 按独立维度筛选空值
+    if not (allow_empty_entity and allow_empty_triple and allow_empty_event):
+        before_count = len(filtered_scores)
+        filtered_scores = [
+            s for s in filtered_scores
+            if check_empty_dimensions_allowed(
+                s.gold_record,
+                allow_empty_entity=allow_empty_entity,
+                allow_empty_triple=allow_empty_triple,
+                allow_empty_event=allow_empty_event,
+            )
+        ]
+        logger.info(
+            f"独立空维度筛选 (entity={allow_empty_entity}, triple={allow_empty_triple}, event={allow_empty_event}): "
+            f"{len(filtered_scores)}/{before_count}"
+        )
     
     # 排序
     def get_sort_key(s: SampleScore) -> float:
@@ -462,13 +542,32 @@ def parse_args() -> argparse.Namespace:
       --gold data/gold.jsonl --pred data/pred.jsonl \\
       --out data/filtered_gold.jsonl \\
       --sort-by entity --export-scores scores.csv
+
+  # 允许实体和事件为空，但三元组不能为空
+  python tools/filter_high_quality_samples.py \\
+      --gold data/gold.jsonl --pred data/pred.jsonl \\
+      --out data/filtered_gold.jsonl \\
+      --allow-empty-entity --allow-empty-event --no-allow-empty-triple
+
+  # 使用 --args 传递 JSON 配置
+  python tools/filter_high_quality_samples.py \\
+      --args '{"gold": "data/gold.jsonl", "pred": "data/pred.jsonl", "out": "data/filtered.jsonl", "top_n": 500}'
+
+  # 使用 --args 从文件加载配置 (以 @ 开头)
+  python tools/filter_high_quality_samples.py --args @config.json
         """,
     )
     
-    # 必填参数
-    parser.add_argument("--gold", required=True, help="Gold 文件路径 (JSONL)")
-    parser.add_argument("--pred", required=True, help="Pred 文件路径 (JSONL)")
-    parser.add_argument("--out", required=True, help="输出筛选后的 gold 文件路径")
+    # --args 参数配置（可覆盖其他参数）
+    parser.add_argument(
+        "--args", type=str, default=None,
+        help="JSON 格式的参数配置字符串，或以 @ 开头的 JSON 文件路径。支持的键：gold, pred, out, top_n, entity_threshold, triple_threshold, event_threshold, sort_by, skip_missing, max_empty_dimensions, allow_empty_entity, allow_empty_triple, allow_empty_event, export_scores, log_file"
+    )
+    
+    # 必填参数（使用 --args 时可省略）
+    parser.add_argument("--gold", default=None, help="Gold 文件路径 (JSONL)")
+    parser.add_argument("--pred", default=None, help="Pred 文件路径 (JSONL)")
+    parser.add_argument("--out", default=None, help="输出筛选后的 gold 文件路径")
     
     # 筛选参数
     parser.add_argument(
@@ -506,6 +605,32 @@ def parse_args() -> argparse.Namespace:
         help="允许的最大空维度数量 (0=三个维度都不能为空, 1=最多1个为空, 2=最多2个为空, 3=不限制，默认: 3)"
     )
     
+    # 独立维度空值控制
+    parser.add_argument(
+        "--allow-empty-entity", action="store_true", default=True,
+        help="允许实体为空（默认: True）"
+    )
+    parser.add_argument(
+        "--no-allow-empty-entity", action="store_false", dest="allow_empty_entity",
+        help="不允许实体为空"
+    )
+    parser.add_argument(
+        "--allow-empty-triple", action="store_true", default=True,
+        help="允许三元组为空（默认: True）"
+    )
+    parser.add_argument(
+        "--no-allow-empty-triple", action="store_false", dest="allow_empty_triple",
+        help="不允许三元组为空"
+    )
+    parser.add_argument(
+        "--allow-empty-event", action="store_true", default=True,
+        help="允许事件为空（默认: True）"
+    )
+    parser.add_argument(
+        "--no-allow-empty-event", action="store_false", dest="allow_empty_event",
+        help="不允许事件为空"
+    )
+    
     # 输出选项
     parser.add_argument(
         "--export-scores", type=str, default=None,
@@ -519,8 +644,75 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def merge_args_with_json(args: argparse.Namespace) -> argparse.Namespace:
+    """
+    合并 --args JSON 配置与命令行参数
+    
+    优先级: 命令行显式参数 > --args JSON 配置 > 默认值
+    """
+    if not args.args:
+        return args
+    
+    # 解析 --args 参数
+    args_str = args.args.strip()
+    if args_str.startswith("@"):
+        # 从文件加载
+        config_path = Path(args_str[1:])
+        if not config_path.exists():
+            raise FileNotFoundError(f"配置文件不存在: {config_path}")
+        json_config = json.loads(config_path.read_text(encoding="utf-8"))
+    else:
+        # 直接解析 JSON 字符串
+        json_config = json.loads(args_str)
+    
+    # 参数映射（JSON 键 -> argparse 属性名）
+    key_mapping = {
+        "gold": "gold",
+        "pred": "pred",
+        "out": "out",
+        "top_n": "top_n",
+        "entity_threshold": "entity_threshold",
+        "triple_threshold": "triple_threshold",
+        "event_threshold": "event_threshold",
+        "sort_by": "sort_by",
+        "skip_missing": "skip_missing",
+        "max_empty_dimensions": "max_empty_dimensions",
+        "allow_empty_entity": "allow_empty_entity",
+        "allow_empty_triple": "allow_empty_triple",
+        "allow_empty_event": "allow_empty_event",
+        "export_scores": "export_scores",
+        "log_file": "log_file",
+    }
+    
+    # 合并配置（JSON 配置作为基础，命令行非 None 值覆盖）
+    for json_key, attr_name in key_mapping.items():
+        if json_key in json_config:
+            json_value = json_config[json_key]
+            current_value = getattr(args, attr_name, None)
+            # 只有当命令行未显式设置时才使用 JSON 值
+            # 对于布尔值和数值类型需要特殊处理
+            if current_value is None or (
+                attr_name in ["gold", "pred", "out", "export_scores", "log_file"] and current_value is None
+            ):
+                setattr(args, attr_name, json_value)
+    
+    return args
+
+
 def main() -> None:
     args = parse_args()
+    
+    # 合并 --args JSON 配置
+    args = merge_args_with_json(args)
+    
+    # 验证必填参数
+    if not args.gold:
+        raise ValueError("缺少必填参数: --gold（可通过 --args 提供）")
+    if not args.pred:
+        raise ValueError("缺少必填参数: --pred（可通过 --args 提供）")
+    if not args.out:
+        raise ValueError("缺少必填参数: --out（可通过 --args 提供）")
+    
     logger = setup_logger(args.log_file)
     
     logger.info("开始加载数据...")
@@ -542,6 +734,9 @@ def main() -> None:
     logger.info(f"  sort_by: {args.sort_by}")
     logger.info(f"  skip_missing: {args.skip_missing}")
     logger.info(f"  max_empty_dimensions: {args.max_empty_dimensions}")
+    logger.info(f"  allow_empty_entity: {args.allow_empty_entity}")
+    logger.info(f"  allow_empty_triple: {args.allow_empty_triple}")
+    logger.info(f"  allow_empty_event: {args.allow_empty_event}")
     
     # 执行筛选
     all_scores, filtered_scores = filter_high_quality_samples(
@@ -554,6 +749,9 @@ def main() -> None:
         sort_by=args.sort_by,
         skip_missing=args.skip_missing,
         max_empty_dimensions=args.max_empty_dimensions,
+        allow_empty_entity=args.allow_empty_entity,
+        allow_empty_triple=args.allow_empty_triple,
+        allow_empty_event=args.allow_empty_event,
     )
     
     # 打印统计信息

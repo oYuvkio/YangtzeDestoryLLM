@@ -27,10 +27,18 @@ Cypher 关系标识符。节点标签由键的首字母大写派生而来。
 from dataclasses import dataclass
 from typing import Dict
 
+# 导入统一格式（新的标准格式）
+from .unified_formats import UnifiedEntity, UnifiedTriple, ProcessingStatus
+
 
 @dataclass
 class Node:
-    """表示图谱中的节点及其基本属性。"""
+    """
+    表示图谱中的节点及其基本属性。
+
+    注意：这是旧格式，建议使用 UnifiedEntity 代替。
+    为了向后兼容，此类仍然保留。
+    """
     id: str
     label: str  # e.g., "event", "location", "time", "cause", "impact", "measure"
     props: Dict
@@ -38,7 +46,12 @@ class Node:
 
 @dataclass
 class Edge:
-    """表示带方向的边，包含关系类型。"""
+    """
+    表示带方向的边，包含关系类型。
+
+    注意：这是旧格式，建议使用 UnifiedTriple 代替。
+    为了向后兼容，此类仍然保留。
+    """
     src: str
     rel: str   # e.g., "occurs_in", "occurs_on", "caused_by", "has_impact", "handled_by"
     dst: str
@@ -68,4 +81,12 @@ RELATIONS = {
     # "affected_population": "affects_population",
 }
 
-__all__ = ["RELATIONS"]
+__all__ = [
+    "RELATIONS",
+    "Node",
+    "Edge",
+    # 导出统一格式（推荐使用）
+    "UnifiedEntity",
+    "UnifiedTriple",
+    "ProcessingStatus",
+]

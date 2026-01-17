@@ -70,10 +70,36 @@ def _normalize_value(text: str, entity_type: str = "") -> str:
     return _normalize_text(text)
 
 
+def _flatten_entities(entities: List[Any]) -> List[Dict[str, Any]]:
+    """兼容扁平与分组实体格式，统一为 {name,type} 列表。"""
+    flattened: List[Dict[str, Any]] = []
+    for item in entities:
+        if not isinstance(item, dict):
+            continue
+        if "name" in item and "type" in item:
+            name = str(item.get("name", "")).strip()
+            etype = str(item.get("type", "")).strip()
+            if name:
+                flattened.append({"name": name, "type": etype})
+            continue
+        for etype, values in item.items():
+            if isinstance(values, list):
+                for value in values:
+                    name = str(value).strip()
+                    if name:
+                        flattened.append({"name": name, "type": str(etype)})
+            elif values:
+                name = str(values).strip()
+                if name:
+                    flattened.append({"name": name, "type": str(etype)})
+    return flattened
+
+
 def _ensure_records(obj: Any, *, use_original_type: bool = False) -> Dict[str, List[Dict[str, Any]]]:
     """
     将输入统一转换为 {events: [...], triples: [...], entities: [...]} 结构。
     新增：当 entities 为空时，从 triples 的 subject/object 推断实体列表。
+    兼容 entities 为 {类型: [实体]} 的分组格式。
     """
     def _normalize_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not use_original_type:
@@ -105,7 +131,7 @@ def _ensure_records(obj: Any, *, use_original_type: bool = False) -> Dict[str, L
     if isinstance(obj, dict):
         events = obj.get("events", []) or obj.get("gold_events", []) or []
         triples = obj.get("triples", []) or obj.get("gold_triples", []) or []
-        entities = obj.get("entities", []) or []
+        entities = _flatten_entities(obj.get("entities", []) or [])
 
         if not entities:
             entities = _extract_entities_from_triples(triples)
@@ -123,7 +149,7 @@ def _ensure_records(obj: Any, *, use_original_type: bool = False) -> Dict[str, L
                 continue
             e = item.get("events", []) or item.get("gold_events", []) or []
             t = item.get("triples", []) or item.get("gold_triples", []) or []
-            ent = item.get("entities", []) or []
+            ent = _flatten_entities(item.get("entities", []) or [])
             events.extend(_normalize_events(e))
             triples.extend(t)
             entities.extend(ent)
@@ -1500,7 +1526,7 @@ def _filter_by_tbox(record: Dict[str, Any], tbox: Dict[str, Any]) -> Dict[str, A
 
     # 过滤实体（排除 _invalid_type=True 或 type 不在 TBox 中的）
     filtered_entities = []
-    for e in record.get("entities", []):
+    for e in _flatten_entities(record.get("entities", [])):
         if e.get("_invalid_type"):
             continue
         etype = e.get("type", "")
@@ -1575,6 +1601,11 @@ def parse_args() -> argparse.Namespace:
         "--use-original-type",
         action="store_true",
         help="使用原始 event_type 进行评测（忽略回退逻辑）",
+    )
+    parser.add_argument(
+        "--enable-type-fallback",
+        action="store_true",
+        help="启用 TBox 类型回退（默认关闭，与 --use-original-type 互斥）",
     )
     parser.add_argument("--out", required=True, help="输出指标 JSON 路径")
     parser.add_argument("--log-file", default="", help="日志文件（可选）")
@@ -1712,6 +1743,21 @@ def main() -> None:
     preds = _load_json_or_jsonl(args.pred)
     tbox = json.loads(Path(args.tbox).read_text(encoding="utf-8"))
 
+    # 确定 use_original_type 的值
+    # --enable-type-fallback 启用回退（use_original_type=False）
+    # --use-original-type 使用原始类型（use_original_type=True）
+    # 默认：使用原始类型（use_original_type=True）
+    if args.enable_type_fallback:
+        use_original_type = False
+        logging.info("[ABox] 类型回退已启用")
+    elif args.use_original_type:
+        use_original_type = True
+        logging.info("[ABox] 使用原始类型（不回退）")
+    else:
+        # 默认行为：使用原始类型（不回退）
+        use_original_type = True
+        logging.info("[ABox] 默认使用原始类型（不回退）")
+
     if isinstance(gold, list) and isinstance(preds, list):
         if len(gold) != len(preds):
             logging.warning(
@@ -1727,7 +1773,7 @@ def main() -> None:
             tbox,
             time_tolerance_days=args.time_tolerance_days,
             geo_synonyms=args.geo_syn,
-            use_original_type=args.use_original_type,
+            use_original_type=use_original_type,
         )
         report_raw["version"] = "raw"
 
@@ -1741,7 +1787,7 @@ def main() -> None:
             tbox,
             time_tolerance_days=args.time_tolerance_days,
             geo_synonyms=args.geo_syn,
-            use_original_type=args.use_original_type,
+            use_original_type=use_original_type,
         )
         report_filtered["version"] = "tbox_filtered"
 
@@ -1758,7 +1804,7 @@ def main() -> None:
             tbox,
             time_tolerance_days=args.time_tolerance_days,
             geo_synonyms=args.geo_syn,
-            use_original_type=args.use_original_type,
+            use_original_type=use_original_type,
         )
         report_raw["version"] = "raw"
 
@@ -1770,7 +1816,7 @@ def main() -> None:
             tbox,
             time_tolerance_days=args.time_tolerance_days,
             geo_synonyms=args.geo_syn,
-            use_original_type=args.use_original_type,
+            use_original_type=use_original_type,
         )
         report_filtered["version"] = "tbox_filtered"
 
