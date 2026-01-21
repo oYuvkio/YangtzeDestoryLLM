@@ -6,15 +6,17 @@ FastAPI HTTP 服务模块
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from .config import ModelConfig, ServiceConfig
 from .model import ModelLoader
-from .prompt import TaskType, TBoxSchema
+from .prompt import TaskType, TBoxSchema, PromptStyle
 from .service import ExtractionRequest, ExtractionResponse, ExtractionService
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,8 @@ class ExtractRequestModel(BaseModel):
     entity_types: Optional[List[str]] = Field(None, description="实体类型列表 (NER)")
     relation_types: Optional[List[str]] = Field(None, description="关系类型列表 (RE)")
     event_roles: Optional[List[str]] = Field(None, description="事件角色列表 (EE)")
+    prompt_style: Optional[str] = Field("default", description="提示词风格: default/generic")
+    fewshot: Optional[bool] = Field(True, description="是否启用 few-shot 示例")
     
     class Config:
         json_schema_extra = {
@@ -71,6 +75,7 @@ class BatchExtractRequestModel(BaseModel):
 def create_app(
     service: ExtractionService,
     model_config: ModelConfig,
+    service_config: ServiceConfig,
 ) -> FastAPI:
     """创建 FastAPI 应用
     
@@ -88,6 +93,9 @@ def create_app(
         docs_url="/docs",
         redoc_url="/redoc",
     )
+
+    app.state.semaphore = asyncio.Semaphore(service_config.max_concurrency)
+    app.state.request_timeout = service_config.request_timeout
     
     # 添加 CORS 中间件（支持跨域访问）
     from fastapi.middleware.cors import CORSMiddleware
@@ -119,6 +127,13 @@ def create_app(
             model_path=model_config.model_path,
             device_map=device_map,
         )
+
+    async def run_extract_with_limits(extraction_request: ExtractionRequest) -> ExtractionResponse:
+        async with app.state.semaphore:
+            return await asyncio.wait_for(
+                run_in_threadpool(service.extract, extraction_request),
+                timeout=app.state.request_timeout,
+            )
     
     @app.post("/extract", response_model=ExtractResponseModel, tags=["抽取"])
     async def extract(request: ExtractRequestModel):
@@ -161,9 +176,14 @@ def create_app(
             task_type=task_type,
             doc_id=request.doc_id,
             schema=schema,
+            prompt_style=PromptStyle(request.prompt_style or "default"),
+            fewshot=bool(request.fewshot) if request.fewshot is not None else True,
         )
         
-        response = service.extract(extraction_request)
+        try:
+            response = await run_extract_with_limits(extraction_request)
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="抽取超时")
         
         return ExtractResponseModel(
             doc_id=response.doc_id,
@@ -218,9 +238,34 @@ def create_app(
                 task_type=task_type,
                 doc_id=req.doc_id,
                 schema=schema,
+                prompt_style=PromptStyle(req.prompt_style or "default"),
+                fewshot=bool(req.fewshot) if req.fewshot is not None else True,
             )
             
-            response = service.extract(extraction_request)
+            try:
+                response = await run_extract_with_limits(extraction_request)
+            except asyncio.TimeoutError:
+                responses.append(ExtractResponseModel(
+                    doc_id=req.doc_id or "",
+                    task_type=req.task_type,
+                    raw_output="",
+                    parsed_result={},
+                    success=False,
+                    latency_ms=0,
+                    error="timeout",
+                ))
+                continue
+            except Exception as exc:
+                responses.append(ExtractResponseModel(
+                    doc_id=req.doc_id or "",
+                    task_type=req.task_type,
+                    raw_output="",
+                    parsed_result={},
+                    success=False,
+                    latency_ms=0,
+                    error=str(exc),
+                ))
+                continue
             
             responses.append(ExtractResponseModel(
                 doc_id=response.doc_id,
@@ -254,11 +299,20 @@ def create_app(
             )
         
         # 执行所有任务
-        results = service.extract_all_tasks(
-            text=request.text,
-            doc_id=request.doc_id,
-            schema=schema,
-        )
+        try:
+            results = await asyncio.wait_for(
+                run_in_threadpool(
+                    service.extract_all_tasks,
+                    text=request.text,
+                    doc_id=request.doc_id,
+                    schema=schema,
+                    prompt_style=PromptStyle(request.prompt_style or "default"),
+                    fewshot=bool(request.fewshot) if request.fewshot is not None else True,
+                ),
+                timeout=app.state.request_timeout,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail="抽取超时")
         
         return {
             task_type: ExtractResponseModel(
@@ -303,7 +357,7 @@ def run_server(
     )
     
     # 创建应用
-    app = create_app(service, model_config)
+    app = create_app(service, model_config, service_config)
     
     # 启动服务
     logger.info(f"启动服务: http://{service_config.host}:{service_config.port}")
@@ -325,9 +379,20 @@ def main():
     parser.add_argument("--host", default="0.0.0.0", help="监听地址")
     parser.add_argument("--port", type=int, default=8000, help="监听端口")
     parser.add_argument("--workers", type=int, default=1, help="工作进程数")
+    parser.add_argument("--max-concurrency", type=int, default=1, help="最大并发请求数")
+    parser.add_argument("--request-timeout", type=int, default=300, help="单请求超时秒数")
     parser.add_argument("--model-path", default="/hy-tmp/zjx/models/modelscope/wenge-research/yayi-uie")
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--device-map",
+        default="balanced_low_0",
+        choices=["auto", "balanced", "balanced_low_0", "sequential"],
+        help="device_map 策略 (默认: balanced_low_0)",
+    )
+    parser.add_argument("--cpu-memory", default="48GiB", help="CPU 最大内存上限 (默认: 48GiB)")
+    parser.add_argument("--gpu-memory", default="22GiB", help="每张 GPU 最大显存上限 (默认: 22GiB)")
+    parser.add_argument("--offload-folder", default="/hy-tmp/zjx/offload", help="权重/状态 offload 目录")
     parser.add_argument("-v", "--verbose", action="store_true", help="详细日志")
     
     args = parser.parse_args()
@@ -336,12 +401,18 @@ def main():
         model_path=args.model_path,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
+        device_map=args.device_map,
+        cpu_max_memory=args.cpu_memory,
+        gpu_max_memory=args.gpu_memory,
+        offload_folder=args.offload_folder,
     )
     
     service_config = ServiceConfig(
         host=args.host,
         port=args.port,
         workers=args.workers,
+        max_concurrency=args.max_concurrency,
+        request_timeout=args.request_timeout,
         verbose=args.verbose,
     )
     

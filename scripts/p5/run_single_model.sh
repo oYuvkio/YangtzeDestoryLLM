@@ -35,9 +35,27 @@
 
 set -eo pipefail
 
-cd /home/zjx/project/YangtzeDestoryLLM
-source /home/zjx/miniconda3/etc/profile.d/conda.sh
-conda activate YangtzeLLM
+#cd /home/zjx/project/YangtzeDestoryLLM
+#source /home/zjx/miniconda3/etc/profile.d/conda.sh
+#conda activate YangtzeLLM
+CONDA_ENV="YangtzeLLM"
+
+if [ -f "/home/zjx/miniconda3/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    . /home/zjx/miniconda3/etc/profile.d/conda.sh
+elif [ -f "/home/zjx/anaconda3/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    . /home/zjx/anaconda3/etc/profile.d/conda.sh
+fi
+
+if command -v conda >/dev/null 2>&1; then
+    # 初始化 conda（支持在脚本中使用 conda activate）
+    eval "$(conda shell.bash hook)"
+    conda activate "${CONDA_ENV}"
+    echo "已激活 Conda 环境: ${CONDA_ENV}"
+else
+    echo "[WARN] conda 未找到，跳过环境激活"
+fi
 export PYTHONPATH=.
 
 # 禁用代理（避免走 http_proxy/https_proxy）

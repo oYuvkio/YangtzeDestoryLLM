@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import logging
 import os
@@ -101,6 +102,35 @@ def is_error_record(record: Dict[str, Any]) -> bool:
     """判断是否为错误记录。"""
     return bool(record.get("error"))
 
+
+def parse_bool(value: Optional[str]) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"invalid bool value: {value}")
+
+
+def parse_json_arg(value: Optional[str]) -> Optional[Dict[str, Any]]:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        try:
+            parsed = ast.literal_eval(value)
+        except (ValueError, SyntaxError) as exc:
+            raise ValueError(f"invalid json value: {value}") from exc
+        if isinstance(parsed, dict):
+            return parsed
+        raise ValueError(f"invalid json value: {value}")
 
 def merge_worker_outputs(args: argparse.Namespace, num_workers: int) -> None:
     """合并多个 worker 的输出文件。"""
@@ -185,6 +215,20 @@ def main() -> None:
     parser.add_argument("--top-p", type=float, default=None, help="Top-P 参数")
     parser.add_argument("--timeout", type=int, default=180, help="请求超时时间（秒，默认 180）")
     parser.add_argument(
+        "--allow-system-role",
+        "--allow_system_role",
+        dest="allow_system_role",
+        default=None,
+        help="是否启用 system role（true/false，默认从 cfg 读取或 true）",
+    )
+    parser.add_argument(
+        "--extra-body",
+        "--extra_body",
+        dest="extra_body",
+        default=None,
+        help="额外请求体 JSON（传给 OpenAI 兼容接口）",
+    )
+    parser.add_argument(
         "--output", "-o",
         default=None,
         help="输出文件路径（默认 outputs/eval_models/{model}/predictions.jsonl）",
@@ -227,6 +271,14 @@ def main() -> None:
                         help="总进程数（默认 1，单进程）")
     parser.add_argument("--worker-id", "-id", type=int, default=0,
                         help="当前进程编号（从 0 开始，默认 0）")
+    parser.add_argument("--worker", type=int, default=None,
+                        help="worker 总数（别名，建议配合 --id 使用）")
+    parser.add_argument("--id", type=int, default=None,
+                        help="当前 worker 编号（别名）")
+    parser.add_argument("--shard-by", choices=["index", "doc_id"], default=None,
+                        help="分片方式：index 或 doc_id（默认 index）")
+    parser.add_argument("--no-worker-suffix", action="store_true",
+                        help="多 worker 模式不追加 _worker{id} 到输出文件名")
     parser.add_argument("--merge", action="store_true",
                         help="合并多个 worker 的输出文件（与 -n 配合使用）")
 
@@ -237,13 +289,16 @@ def main() -> None:
         os.environ["OPENAI_API_KEY"] = args.api_key.split(",")[0]
 
     # 验证多进程参数
-    num_workers = args.num_workers
-    worker_id = args.worker_id
+    num_workers = args.worker if args.worker is not None else args.num_workers
+    worker_id = args.id if args.id is not None else args.worker_id
     if num_workers < 1:
         num_workers = 1
     if worker_id < 0 or worker_id >= num_workers:
         print(f"错误: worker_id ({worker_id}) 必须在 [0, {num_workers - 1}] 范围内")
         return
+    shard_by = args.shard_by
+    if shard_by is None:
+        shard_by = "doc_id" if args.worker is not None or args.id is not None else "index"
 
     # 如果是合并模式，执行合并后退出
     if args.merge:
@@ -279,6 +334,20 @@ def main() -> None:
     temperature = args.temperature if args.temperature is not None else cfg_llm.get("temperature", 0.1)
     top_p = args.top_p if args.top_p is not None else cfg_llm.get("top_p")
     timeout = args.timeout if args.timeout is not None else cfg_llm.get("timeout", 180)
+    allow_system_role = cfg_llm.get("allow_system_role", True)
+    if args.allow_system_role is not None:
+        try:
+            allow_system_role = parse_bool(args.allow_system_role)
+        except ValueError as exc:
+            print(f"错误: {exc}")
+            return
+    extra_body = None
+    if args.extra_body is not None:
+        try:
+            extra_body = parse_json_arg(args.extra_body)
+        except ValueError as exc:
+            print(f"错误: {exc}")
+            return
 
     # 输出路径
     if args.output:
@@ -288,7 +357,7 @@ def main() -> None:
         output_path = Path(f"outputs/eval_models/{model_dir_name}/predictions.jsonl")
 
     # 多进程模式下，每个 worker 写入独立文件
-    if num_workers > 1:
+    if num_workers > 1 and not args.no_worker_suffix:
         stem = output_path.stem
         suffix = output_path.suffix
         output_path = output_path.with_name(f"{stem}_worker{worker_id}{suffix}")
@@ -305,13 +374,32 @@ def main() -> None:
     if args.limit:
         samples = samples[:args.limit]
 
-    # 多进程分片：按取模法筛选当前 worker 负责的样本
+    # 多进程分片：按 index 或 doc_id hash 取模
     total_samples = len(samples)
+    filtered_samples = []
+    for i, sample in enumerate(samples):
+        doc_id = resolve_doc_id(sample, i + 1)
+        if num_workers > 1:
+            if shard_by == "doc_id":
+                import hashlib
+                bucket = int(hashlib.md5(doc_id.encode("utf-8")).hexdigest(), 16) % num_workers
+            else:
+                bucket = i % num_workers
+            if bucket != worker_id:
+                continue
+        filtered_samples.append((i, sample, doc_id))
+    samples = filtered_samples
     if num_workers > 1:
-        samples = [(i, s) for i, s in enumerate(samples) if i % num_workers == worker_id]
-        logger.info(f"Worker {worker_id}/{num_workers}: 负责 {len(samples)}/{total_samples} 个样本")
+        logger.info(
+            "Worker %d/%d: 负责 %d/%d 个样本 (shard_by=%s)",
+            worker_id,
+            num_workers,
+            len(samples),
+            total_samples,
+            shard_by,
+        )
     else:
-        samples = [(i, s) for i, s in enumerate(samples)]
+        logger.info("样本总数: %d", total_samples)
 
     logger.info(f"测试集样本数: {len(samples)}")
 
@@ -342,11 +430,14 @@ def main() -> None:
         "temperature": temperature,
         "timeout": timeout,
         "no_retry": True,
+        "allow_system_role": allow_system_role,
     }
     if top_p is not None:
         llm_config["top_p"] = top_p
     if base_url:
         llm_config["base_url"] = base_url
+    if extra_body is not None:
+        llm_config["extra_body"] = extra_body
 
     logger.info(
         "LLM 配置: provider=%s, model=%s, temperature=%s, top_p=%s, timeout=%ss, use_cot=%s, use_verify=%s, use_graph=%s",
@@ -359,6 +450,9 @@ def main() -> None:
         use_verify,
         use_graph,
     )
+    logger.info("System role: %s", "开启" if allow_system_role else "关闭")
+    if extra_body is not None:
+        logger.info("extra_body: %s", json.dumps(extra_body, ensure_ascii=False))
     logger.info("Schema 严格约束: %s", "开启" if strict_schema else "关闭")
     if num_workers > 1:
         logger.info("多进程模式: worker %d / %d", worker_id, num_workers)
@@ -419,8 +513,7 @@ def main() -> None:
             out_f.flush()
             logger.info("保留正常记录: %d 条（准备重跑 error 记录）", preserved_count)
 
-        for proc_idx, (orig_idx, sample) in enumerate(samples, start=1):
-            doc_id = resolve_doc_id(sample, orig_idx + 1)
+        for proc_idx, (orig_idx, sample, doc_id) in enumerate(samples, start=1):
             source_text, source_tag = resolve_source_text(
                 sample,
                 doc_id,
@@ -562,6 +655,7 @@ def main() -> None:
         "worker_samples": len(samples),
         "num_workers": num_workers,
         "worker_id": worker_id,
+        "shard_by": shard_by,
         "success_count": success_count,
         "skip_count": skip_count,
         "error_count": error_count,
@@ -570,6 +664,8 @@ def main() -> None:
         "use_verify": use_verify,
         "use_graph": use_graph,
         "strict_schema": strict_schema,
+        "allow_system_role": allow_system_role,
+        "extra_body": extra_body,
         "retry_errors": args.retry_errors,
         "output": str(output_path),
     }

@@ -49,10 +49,10 @@ fi
 # 配置区域（根据需要修改）
 # =============================================================================
 #改
-MODEL="gpt-4o-mini"
-API_KEY="sk-SgzHNynm92rMPoR2cw33XQvBShqoa4JdD6qf2pMmmZ9VmZHh"
-BASE_URL="https://x666.me/v1/"
-OUTPUT_BASE="outputs/eval_models_hybrid/gpt/"
+MODEL="google/gemma-7b"
+API_KEY="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"
+BASE_URL="https://integrate.api.nvidia.com/v1/"
+OUTPUT_BASE="outputs/eval_models_hybrid/gemma_7b/"
 
 #不改
 TEST_FILE="outputs/eval_models_hybrid/longcat/full/predictions.jsonl"

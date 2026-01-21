@@ -20,7 +20,6 @@
 #   bash scripts/p5/ablation/run_ablation_experiments.sh all       # 运行全部（含 full）
 #   bash scripts/p5/ablation/run_ablation_experiments.sh ablation  # 只运行消融实验（跳过 full）
 # =============================================================================
-
 set -e  # 遇到错误立即退出
 
 # =============================================================================
@@ -29,39 +28,24 @@ set -e  # 遇到错误立即退出
 CONDA_ENV="YangtzeLLM"
 
 # 初始化 conda（支持在脚本中使用 conda activate）
-if [ -f "/home/zjx/miniconda3/etc/profile.d/conda.sh" ]; then
-    # shellcheck disable=SC1091
-    . /home/zjx/miniconda3/etc/profile.d/conda.sh
-elif [ -f "/home/zjx/anaconda3/etc/profile.d/conda.sh" ]; then
-    # shellcheck disable=SC1091
-    . /home/zjx/anaconda3/etc/profile.d/conda.sh
-fi
-
-if command -v conda >/dev/null 2>&1; then
-    eval "$(conda shell.bash hook)"
-    conda activate "${CONDA_ENV}"
-    echo "已激活 Conda 环境: ${CONDA_ENV}"
-else
-    echo "[WARN] conda 未找到，跳过环境激活"
-fi
+eval "$(conda shell.bash hook)"
+conda activate "${CONDA_ENV}"
+echo "已激活 Conda 环境: ${CONDA_ENV}"
 
 # =============================================================================
 # 配置区域（根据需要修改）
 # =============================================================================
-#改
-MODEL="gpt-4o-mini"
-API_KEY="sk-SgzHNynm92rMPoR2cw33XQvBShqoa4JdD6qf2pMmmZ9VmZHh"
-BASE_URL="https://x666.me/v1/"
-OUTPUT_BASE="outputs/eval_models_hybrid/gpt/"
-
-#不改
-TEST_FILE="outputs/eval_models_hybrid/longcat/full/predictions.jsonl"
+TEST_FILE="outputs/eval_models/gold/merge_filted_2.jsonl"
 TEXT_SOURCE="data/corpus_for_kg/filtered_ytz_corpus/light_pool_v2_dedup.jsonl"
 TBOX="outputs/kg_final/tbox_final.json"
+MODEL="LongCat-Flash-Chat"
+BASE_URL="https://api.longcat.chat/openai/v1"
+API_KEY="ak_1vn3vN4fX8IL8Ee12n7KN6Rb4u57C"
 TEMPERATURE=0.1
 TOP_P=0.1
 FUZZY_THRESHOLD=0.75
-INTERVAL=10
+INTERVAL=1
+OUTPUT_BASE="outputs/eval_models_hybrid/longcat"
 
 # =============================================================================
 # 评测配置（默认沿用抽取配置）
@@ -70,7 +54,6 @@ RUN_EVAL=true
 RUN_COMPARE=true
 EVAL_TEST_FILE="${TEST_FILE}"
 EVAL_TBOX="${TBOX}"
-
 
 # =============================================================================
 # 创建输出目录

@@ -608,12 +608,14 @@ class HybridOntologyBuilder:
         config: Optional[Dict[str, Any]] = None,
     ):
         cfg = config or {}
-        self.llm = LLMFactory.create(llm_config or {
+        llm_cfg = llm_config or {
             "provider": "openai",
             "model_name": "gpt-4o-mini",
             "temperature": 0.1,
-        })
-        self.client = LLMJsonClient(self.llm)
+        }
+        self.llm = LLMFactory.create(llm_cfg)
+        allow_system_role = bool(llm_cfg.get("allow_system_role", True))
+        self.client = LLMJsonClient(self.llm, allow_system_role=allow_system_role)
         self.embedding_model = SentenceTransformer(embedding_model_name, device=embedding_device)
 
         self.clustering_config = cfg.get("clustering", {})

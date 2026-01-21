@@ -12,13 +12,15 @@ import json
 import logging
 import sys
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .config import ModelConfig
 from .model import ModelLoader
-from .prompt import TaskType, TBoxSchema
+from .prompt import TaskType, TBoxSchema, PromptStyle
 from .service import ExtractionRequest, ExtractionService, convert_to_unified_format
 from .utils import load_jsonl, pick_doc_id, pick_source_text
 
@@ -137,6 +139,51 @@ def load_text_lookup(
     return lookup
 
 
+def build_extract_payload(
+    text: str,
+    task_type: TaskType,
+    doc_id: str,
+    schema: Optional[TBoxSchema],
+    prompt_style: PromptStyle,
+    fewshot: bool,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "text": text,
+        "task_type": task_type.value,
+        "doc_id": doc_id,
+    }
+    if schema:
+        payload.update(
+            {
+                "entity_types": schema.entity_types,
+                "relation_types": schema.relation_types,
+                "event_roles": schema.event_roles,
+            }
+        )
+    payload["prompt_style"] = prompt_style.value
+    payload["fewshot"] = fewshot
+    return payload
+
+
+def post_json(url: str, payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="ignore") if exc.fp else ""
+        raise RuntimeError(f"HTTP {exc.code}: {error_body or exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"请求失败: {exc.reason}") from exc
+    return json.loads(body)
+
+
 def resolve_source_text(
     sample: Dict[str, Any],
     doc_id: str,
@@ -181,6 +228,10 @@ def run_batch_extraction(
     skip_existing: bool = False,
     verbose: bool = False,
     interval: float = 0.0,
+    server_url: Optional[str] = None,
+    http_timeout: int = 180,
+    prompt_style: PromptStyle = PromptStyle.DEFAULT,
+    fewshot: bool = True,
 ) -> Dict[str, Any]:
     """运行批量抽取
     
@@ -195,6 +246,8 @@ def run_batch_extraction(
         skip_existing: 是否跳过已存在的预测
         verbose: 是否打印详细日志
         interval: 请求间隔（秒）
+        server_url: HTTP 服务地址（设置后通过服务抽取）
+        http_timeout: HTTP 请求超时（秒）
     
     Returns:
         运行统计信息
@@ -241,19 +294,25 @@ def run_batch_extraction(
         existing_predictions = load_existing_predictions(output_path)
         logger.info(f"已有预测: {len(existing_predictions)} 条")
     
-    # 加载模型
-    logger.info("加载模型...")
-    loader = ModelLoader(model_config)
-    loader.load()
-    
-    # 创建服务
-    service = ExtractionService(
-        model_loader=loader,
-        max_new_tokens=model_config.max_new_tokens,
-        temperature=model_config.temperature,
-        do_sample=model_config.do_sample,
-        verbose=verbose,
-    )
+    service = None
+    extract_url = ""
+    if server_url:
+        extract_url = server_url.rstrip("/") + "/extract"
+        logger.info(f"使用 HTTP 服务进行抽取: {extract_url}")
+    else:
+        # 加载模型
+        logger.info("加载模型...")
+        loader = ModelLoader(model_config)
+        loader.load()
+        
+        # 创建服务
+        service = ExtractionService(
+            model_loader=loader,
+            max_new_tokens=model_config.max_new_tokens,
+            temperature=model_config.temperature,
+            do_sample=model_config.do_sample,
+            verbose=verbose,
+        )
     
     # 运行抽取
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -313,25 +372,51 @@ def run_batch_extraction(
                 total_latency = 0.0
                 
                 for t_type in task_types:
-                    request = ExtractionRequest(
-                        text=source_text,
-                        task_type=t_type,
-                        doc_id=doc_id,
-                        schema=schema,
-                    )
-                    
-                    response = service.extract(request)
-                    all_raw_outputs.append(f"[{t_type.value}] {response.raw_output}")
-                    total_latency += response.latency_ms
-                    
-                    if response.success:
-                        parsed = response.parsed_result
-                        if t_type == TaskType.NER:
-                            all_entities.extend(parsed.get("entities", []))
-                        elif t_type == TaskType.RE:
-                            all_triples.extend(parsed.get("triples", []))
-                        elif t_type == TaskType.EE:
-                            all_events.extend(parsed.get("events", []))
+                    if extract_url:
+                        payload = build_extract_payload(
+                            source_text,
+                            t_type,
+                            doc_id,
+                            schema,
+                            prompt_style,
+                            fewshot,
+                        )
+                        resp_data = post_json(extract_url, payload, timeout=http_timeout)
+                        all_raw_outputs.append(f"[{t_type.value}] {resp_data.get('raw_output', '')}")
+                        total_latency += float(resp_data.get("latency_ms", 0))
+                        if resp_data.get("success"):
+                            parsed = resp_data.get("parsed_result", {})
+                            if t_type == TaskType.NER:
+                                all_entities.extend(parsed.get("entities", []))
+                            elif t_type == TaskType.RE:
+                                all_triples.extend(parsed.get("triples", []))
+                            elif t_type == TaskType.EE:
+                                all_events.extend(parsed.get("events", []))
+                        else:
+                            logger.warning(
+                                f"[{idx}/{len(samples)}] {doc_id}: "
+                                f"{t_type.value} 抽取失败 - {resp_data.get('error')}"
+                            )
+                    else:
+                        request = ExtractionRequest(
+                            text=source_text,
+                            task_type=t_type,
+                            doc_id=doc_id,
+                            schema=schema,
+                            prompt_style=prompt_style,
+                            fewshot=fewshot,
+                        )
+                        response = service.extract(request)
+                        all_raw_outputs.append(f"[{t_type.value}] {response.raw_output}")
+                        total_latency += response.latency_ms
+                        if response.success:
+                            parsed = response.parsed_result
+                            if t_type == TaskType.NER:
+                                all_entities.extend(parsed.get("entities", []))
+                            elif t_type == TaskType.RE:
+                                all_triples.extend(parsed.get("triples", []))
+                            elif t_type == TaskType.EE:
+                                all_events.extend(parsed.get("events", []))
                 
                 # 合并结果
                 record = {
@@ -392,6 +477,8 @@ def run_batch_extraction(
         "test_file": str(test_file),
         "text_source": str(text_source_path) if text_source_path else None,
         "tbox_file": str(tbox_path) if tbox_path else None,
+        "server_url": server_url,
+        "http_timeout": http_timeout,
         "total_samples": len(samples),
         "success_count": success_count,
         "skip_count": skip_count,
@@ -451,6 +538,17 @@ def main():
         default="re",
         help="任务类型: ner/re/ee 单任务，ner+re 实体+关系，all 全部任务 (默认: re)",
     )
+    parser.add_argument(
+        "--prompt-style",
+        choices=["default", "generic"],
+        default="default",
+        help="提示词风格：default（原版） / generic（通用+few-shot）",
+    )
+    parser.add_argument(
+        "--no-fewshot",
+        action="store_true",
+        help="关闭通用 Prompt 的 few-shot 示例",
+    )
     
     # 模型配置
     parser.add_argument(
@@ -488,6 +586,17 @@ def main():
         type=float,
         default=0.0,
         help="请求间隔秒数 (默认: 0)",
+    )
+    parser.add_argument(
+        "--server-url",
+        default=None,
+        help="HTTP 服务地址（设置后通过服务抽取，例如 http://127.0.0.1:8000）",
+    )
+    parser.add_argument(
+        "--http-timeout",
+        type=int,
+        default=180,
+        help="HTTP 请求超时秒数 (默认: 180)",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -548,6 +657,10 @@ def main():
         skip_existing=args.skip_existing,
         verbose=args.verbose,
         interval=args.interval,
+        server_url=args.server_url,
+        http_timeout=args.http_timeout,
+        prompt_style=PromptStyle(args.prompt_style),
+        fewshot=not args.no_fewshot,
     )
 
 

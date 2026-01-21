@@ -199,18 +199,25 @@ def format_schema_for_prompt(schema_json: Dict[str, Any], style: str = "markdown
 class LLMJsonClient:
     """封装 JSON 强制输出的调用逻辑，屏蔽不同 provider 细节。"""
 
-    def __init__(self, llm: LLMBackend):
+    def __init__(self, llm: LLMBackend, *, allow_system_role: bool = True):
         self.llm = llm
+        self.allow_system_role = allow_system_role
 
     def call(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         """
         以 messages 形式调用 LLM 并解析 JSON。
         若模型返回 Markdown 代码块，会自动剥离。
         """
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        if self.allow_system_role:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        else:
+            merged = user_prompt
+            if system_prompt:
+                merged = f"{system_prompt}\n\n{user_prompt}"
+            messages = [{"role": "user", "content": merged}]
         raw = self.llm.chat_messages(messages, json_mode=True)
         return self._safe_load(raw)
 
@@ -288,10 +295,22 @@ class CQLLMPipeline:
             "temperature": 0.1,
         }
         self.llm_config = config  # 保存配置，便于日志/调试
+        self.allow_system_role = bool(config.get("allow_system_role", True))
         self.llm = LLMFactory.create(config)
-        self.client = LLMJsonClient(self.llm)
+        self.client = LLMJsonClient(self.llm, allow_system_role=self.allow_system_role)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def _build_messages(self, system_prompt: str, user_prompt: str) -> List[Dict[str, str]]:
+        if self.allow_system_role:
+            return [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        merged = user_prompt
+        if system_prompt:
+            merged = f"{system_prompt}\n\n{user_prompt}"
+        return [{"role": "user", "content": merged}]
 
     # ---------- P1 ----------
     def generate_cqs(self, domain_desc: str, n_cq: int = 30, save_path: Optional[Path] = None) -> List[CQ]:
@@ -640,10 +659,10 @@ class CQLLMPipeline:
                 graph_prompt=graph_prompt,
                 graph_steps=graph_steps,
             )
-            messages = [
-                {"role": "system", "content": "你是水旱灾害知识图谱构建专家，请按照思维链格式输出。"},
-                {"role": "user", "content": user_prompt},
-            ]
+            messages = self._build_messages(
+                "你是水旱灾害知识图谱构建专家，请按照思维链格式输出。",
+                user_prompt,
+            )
             try:
                 raw_response = self.llm.chat_messages(messages, json_mode=False)
             except Exception as exc:
@@ -1020,10 +1039,7 @@ class CQLLMPipeline:
                 graph_prompt=graph_prompt,
                 graph_steps=graph_steps,
             )
-            messages = [
-                {"role": "system", "content": UNIFIED_SYSTEM_PROMPT_COT},
-                {"role": "user", "content": user_prompt},
-            ]
+            messages = self._build_messages(UNIFIED_SYSTEM_PROMPT_COT, user_prompt)
             try:
                 raw_response = self.llm.chat_messages(messages, json_mode=False)
             except Exception as exc:

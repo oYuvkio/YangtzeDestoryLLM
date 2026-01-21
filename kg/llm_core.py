@@ -385,11 +385,13 @@ _PROVIDERS_NO_RESPONSE_FORMAT = {
     "longcat",      # LongCat API
     "gemini",       # Gemini 代理
     "deepseek",     # DeepSeek（部分模型）
+    "runanytime",   # RunAnytime 代理
 }
 
 # 需要自动补全路径的 API 提供商
 _PROVIDER_URL_FIXES = {
     "longcat.chat": "/openai/v1",  # LongCat: api.longcat.chat -> api.longcat.chat/openai/v1
+    "runanytime.hxi.me": "/v1",    # RunAnytime: runanytime.hxi.me -> runanytime.hxi.me/v1
 }
 
 
@@ -497,6 +499,20 @@ class LLMClient:
         
         # ===== 思考模式配置 =====
         self.enable_thinking = config.get("enable_thinking", False)
+        self.extra_body = None
+        raw_extra_body = config.get("extra_body")
+        if raw_extra_body is not None:
+            if isinstance(raw_extra_body, dict):
+                self.extra_body = raw_extra_body
+            elif isinstance(raw_extra_body, str):
+                try:
+                    self.extra_body = json.loads(raw_extra_body)
+                except json.JSONDecodeError:
+                    logger.warning("extra_body JSON 解析失败，已忽略。")
+            else:
+                logger.warning("extra_body 类型不支持，已忽略。")
+        if self.extra_body is not None and self.enable_thinking:
+            logger.info("extra_body 已提供，将忽略 enable_thinking 设置。")
         
         # ===== 检测 API 提供商特性 =====
         self._provider_name = self._detect_provider(base_url)
@@ -757,12 +773,14 @@ class LLMClient:
                     params["response_format"] = {"type": "json_object"}
                 
                 # ===== 发送请求 =====
-                # 如果启用思考模式，添加 extra_body 参数
-                if self.enable_thinking:
-                    params["extra_body"] = {"thinking": {"type": "enabled"}}
-                    logger.debug(f"🧠 思考模式已启用，正在调用 LLM...")
+                extra_body = self.extra_body
+                if extra_body is None and self.enable_thinking:
+                    extra_body = {"thinking": {"type": "enabled"}}
+                if extra_body is not None:
+                    params["extra_body"] = extra_body
+                    logger.debug("🧠 extra_body 已启用，正在调用 LLM...")
                 else:
-                    logger.debug(f"💬 普通模式调用 LLM...")
+                    logger.debug("💬 普通模式调用 LLM...")
 
                 if debug_llm:
                     total_chars = sum(len(m.get("content", "")) for m in messages)
@@ -777,7 +795,7 @@ class LLMClient:
                     logger.info("=" * 80)
                     logger.info(
                         "[LLM][REQ] attempt=%s/%s provider=%s model=%s base_url=%s "
-                        "json_mode=%s response_format=%s thinking=%s timeout=%ss "
+                        "json_mode=%s response_format=%s thinking=%s extra_body=%s timeout=%ss "
                         "temperature=%s max_tokens=%s messages=%s total_chars=%s\n%s",
                         attempt + 1,
                         attempts_total,
@@ -787,6 +805,7 @@ class LLMClient:
                         json_mode,
                         use_response_format,
                         self.enable_thinking,
+                        "set" if extra_body is not None else "none",
                         self.timeout,
                         params.get("temperature"),
                         self.max_tokens,

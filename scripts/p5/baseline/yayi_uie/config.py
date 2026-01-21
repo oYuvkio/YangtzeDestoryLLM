@@ -67,6 +67,8 @@ class ServiceConfig:
     host: str = "0.0.0.0"
     port: int = 8000
     workers: int = 1
+    max_concurrency: int = 1
+    request_timeout: int = 300
     debug: bool = False
     verbose: bool = False
     log_dir: str = "logs/yayi-uie"
@@ -123,6 +125,10 @@ class Config:
             config.service.host = os.getenv("YAYI_HOST")
         if os.getenv("YAYI_PORT"):
             config.service.port = int(os.getenv("YAYI_PORT"))
+        if os.getenv("YAYI_MAX_CONCURRENCY"):
+            config.service.max_concurrency = int(os.getenv("YAYI_MAX_CONCURRENCY"))
+        if os.getenv("YAYI_REQUEST_TIMEOUT"):
+            config.service.request_timeout = int(os.getenv("YAYI_REQUEST_TIMEOUT"))
         if os.getenv("YAYI_DEBUG"):
             config.service.debug = os.getenv("YAYI_DEBUG").lower() in ("true", "1", "yes")
         if os.getenv("YAYI_VERBOSE"):
@@ -152,6 +158,8 @@ class Config:
                 "host": self.service.host,
                 "port": self.service.port,
                 "workers": self.service.workers,
+                "max_concurrency": self.service.max_concurrency,
+                "request_timeout": self.service.request_timeout,
                 "debug": self.service.debug,
                 "verbose": self.service.verbose,
                 "log_dir": self.service.log_dir,

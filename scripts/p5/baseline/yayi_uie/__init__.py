@@ -11,11 +11,14 @@ from .config import ModelConfig, ServiceConfig, Config
 from .model import ModelLoader
 from .prompt import (
     TaskType,
+    PromptStyle,
     TBoxSchema,
     BasePromptBuilder,
     NERPromptBuilder,
     REPromptBuilder,
     EEPromptBuilder,
+    GenericNERPromptBuilder,
+    GenericREPromptBuilder,
     PromptBuilderFactory,
 )
 from .parser import (
@@ -51,11 +54,14 @@ __all__ = [
     "ModelLoader",
     # Prompt
     "TaskType",
+    "PromptStyle",
     "TBoxSchema",
     "BasePromptBuilder",
     "NERPromptBuilder",
     "REPromptBuilder",
     "EEPromptBuilder",
+    "GenericNERPromptBuilder",
+    "GenericREPromptBuilder",
     "PromptBuilderFactory",
     # Parser
     "ParseResult",

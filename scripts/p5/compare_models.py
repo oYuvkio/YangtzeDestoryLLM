@@ -43,17 +43,31 @@ def format_model_dir(model_name: str) -> str:
     return model_name.replace("/", "_").replace(":", "_")
 
 
+def select_metrics(metrics: Dict[str, Any], version: str) -> Dict[str, Any]:
+    """选择指标版本（兼容 raw/tbox_filtered 或旧格式）。"""
+    if "raw" in metrics and "tbox_filtered" in metrics:
+        return metrics.get(version) or metrics.get("raw") or metrics.get("tbox_filtered") or {}
+    return metrics
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="汇总多模型评测结果")
     parser.add_argument("--input-dir", required=True, help="评测结果目录")
     parser.add_argument("--models", required=True, help="模型列表（空格分隔）")
     parser.add_argument("--output", "-o", required=True, help="输出报告路径")
+    parser.add_argument(
+        "--version",
+        choices=["raw", "tbox_filtered"],
+        default="raw",
+        help="指标版本（默认 raw）",
+    )
 
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
     output_path = Path(args.output)
     model_names = args.models.split()
+    metrics_version = args.version
 
     print("=" * 60)
     print("多模型评测汇总")
@@ -77,13 +91,21 @@ def main() -> None:
             print(f"[WARN] {model_name}: 未找到 metrics.json")
             continue
 
+        selected_metrics = select_metrics(metrics, metrics_version)
+        triple_strict = selected_metrics.get("triple_f1_strict", 0)
+        triple_relaxed = selected_metrics.get("triple_f1_relaxed", 0)
         result = {
             "model": model_name,
-            "event_f1": metrics.get("event_f1", 0),
-            "triple_f1_strict": metrics.get("triple_f1_strict", 0),
-            "triple_f1_relaxed": metrics.get("triple_f1_relaxed", 0),
-            "tbox_consistency": metrics.get("tbox_consistency", 0),
-            "sample_count": metrics.get("sample_count", 0),
+            "metrics_version": metrics_version,
+            "entity_f1": selected_metrics.get("entity_f1", 0),
+            "relation_f1_strict": triple_strict,
+            "relation_f1_relaxed": triple_relaxed,
+            "event_f1": selected_metrics.get("event_f1", 0),
+            "hallucination_rate": selected_metrics.get("hallucination_rate", 0),
+            "tbox_consistency": selected_metrics.get("tbox_consistency", 0),
+            "sample_count": selected_metrics.get("sample_count", 0),
+            "triple_f1_strict": triple_strict,
+            "triple_f1_relaxed": triple_relaxed,
         }
 
         # 添加对齐信息
@@ -92,7 +114,7 @@ def main() -> None:
             result["align_missing"] = align_report.get("missing_count", 0)
 
         # 添加错误统计
-        error_breakdown = metrics.get("error_breakdown", {})
+        error_breakdown = selected_metrics.get("error_breakdown", {})
         if error_breakdown:
             events_errors = error_breakdown.get("events", {})
             triples_errors = error_breakdown.get("triples", {})
@@ -111,6 +133,7 @@ def main() -> None:
         "timestamp": datetime.now().isoformat(),
         "model_count": len(results),
         "input_dir": str(input_dir),
+        "metrics_version": metrics_version,
         "results": results,
         "best_model": results[0]["model"] if results else None,
         "ranking": [r["model"] for r in results],
@@ -120,22 +143,35 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def fmt_metric(value: Any, width: int = 8) -> str:
+        if value is None:
+            return f"{'N/A':>{width}}"
+        try:
+            return f"{float(value):>{width}.4f}"
+        except (TypeError, ValueError):
+            return f"{'N/A':>{width}}"
+
     # 打印对比表格
     print()
     print("=" * 80)
-    print("评测结果对比")
+    print(f"评测结果对比（版本: {metrics_version}）")
     print("=" * 80)
     print()
-    print(f"{'模型':<20} {'Event F1':>10} {'Triple(S)':>10} {'Triple(R)':>10} {'TBox':>10}")
+    print(
+        f"{'模型':<20} {'Entity':>8} {'Rel(S)':>8} {'Rel(R)':>8} "
+        f"{'Event':>8} {'Halluc':>8} {'TBox':>8}"
+    )
     print("-" * 80)
 
     for r in results:
         print(
             f"{r['model']:<20} "
-            f"{r['event_f1']:>10.4f} "
-            f"{r['triple_f1_strict']:>10.4f} "
-            f"{r['triple_f1_relaxed']:>10.4f} "
-            f"{r['tbox_consistency']:>10.4f}"
+            f"{fmt_metric(r.get('entity_f1'))} "
+            f"{fmt_metric(r.get('relation_f1_strict'))} "
+            f"{fmt_metric(r.get('relation_f1_relaxed'))} "
+            f"{fmt_metric(r.get('event_f1'))} "
+            f"{fmt_metric(r.get('hallucination_rate'))} "
+            f"{fmt_metric(r.get('tbox_consistency'))}"
         )
 
     print("-" * 80)
@@ -144,9 +180,12 @@ def main() -> None:
     if results:
         best = results[0]
         print(f"最佳模型: {best['model']}")
-        print(f"  Event F1: {best['event_f1']:.4f}")
-        print(f"  Triple F1 (Strict): {best['triple_f1_strict']:.4f}")
-        print(f"  Triple F1 (Relaxed): {best['triple_f1_relaxed']:.4f}")
+        print(f"  Entity F1: {fmt_metric(best.get('entity_f1'), width=0).strip()}")
+        print(f"  Relation F1 (Strict): {fmt_metric(best.get('relation_f1_strict'), width=0).strip()}")
+        print(f"  Relation F1 (Relaxed): {fmt_metric(best.get('relation_f1_relaxed'), width=0).strip()}")
+        print(f"  Event F1: {fmt_metric(best.get('event_f1'), width=0).strip()}")
+        print(f"  Hallucination Rate: {fmt_metric(best.get('hallucination_rate'), width=0).strip()}")
+        print(f"  TBox Consistency: {fmt_metric(best.get('tbox_consistency'), width=0).strip()}")
         print()
 
     print(f"报告已保存: {output_path}")

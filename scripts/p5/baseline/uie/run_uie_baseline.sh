@@ -47,6 +47,7 @@ REL_MAPPING=""
 # 完整文本来源：使用 light_pool_v2_dedup.jsonl 的 text 字段（未截断）
 TEXT_SOURCE="data/corpus_for_kg/filtered_ytz_corpus/light_pool_v2_dedup.jsonl"
 TASK="all"  # ner, re, all
+EXTRA_ARGS=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -102,6 +103,10 @@ while [[ $# -gt 0 ]]; do
             TASK="$2"
             shift 2
             ;;
+        --args)
+            EXTRA_ARGS="$2"
+            shift 2
+            ;;
         --help)
             echo "使用方式:"
             echo "  --model-name       PP-UIE 模型名称（默认 paddlenlp/PP-UIE-0.5B，可选 1.5B/7B/14B）"
@@ -116,6 +121,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --relation-mapping 关系映射配置文件路径（可选）"
             echo "  --text-source      完整文本来源文件（推荐 light_pool_v2_dedup.jsonl）"
             echo "  --task             任务类型：ner（仅实体识别）, re（仅关系抽取）, all（全部，默认）"
+            echo "  --args             追加参数（直接传给 run_uie_baseline.py）"
             exit 0
             ;;
         *)
@@ -208,7 +214,8 @@ if [ -f "$PRED_FILE" ]; then
             --skip-existing \
             $LIMIT_FLAG \
             $TEXT_SOURCE_FLAG \
-            $TASK_FLAG
+            $TASK_FLAG \
+            $EXTRA_ARGS
     fi
 else
     python scripts/p5/baseline/uie/run_uie_baseline.py \
@@ -221,7 +228,8 @@ else
         --interval "$INTERVAL" \
         $LIMIT_FLAG \
         $TEXT_SOURCE_FLAG \
-        $TASK_FLAG
+        $TASK_FLAG \
+        $EXTRA_ARGS
 fi
 
 echo ""

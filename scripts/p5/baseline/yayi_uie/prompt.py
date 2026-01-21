@@ -19,6 +19,12 @@ class TaskType(Enum):
     EE = "ee"     # 事件抽取
 
 
+class PromptStyle(Enum):
+    """提示词风格"""
+    DEFAULT = "default"
+    GENERIC = "generic"
+
+
 @dataclass
 class TBoxSchema:
     """TBox 模式定义
@@ -136,6 +142,36 @@ class NERPromptBuilder(BasePromptBuilder):
         return self.wrap_prompt(prompt)
 
 
+class GenericNERPromptBuilder(BasePromptBuilder):
+    """通用 NER Prompt（少量 few-shot），输出 {类型: [实体]}"""
+
+    def __init__(self, fewshot: bool = True):
+        self.fewshot = fewshot
+
+    def build(self, text: str, schema: Optional[TBoxSchema] = None) -> str:
+        if schema and schema.entity_types:
+            types = schema.entity_types
+        else:
+            types = NERPromptBuilder.DEFAULT_ENTITY_TYPES
+
+        type_lines = "\n".join([f"- {t}" for t in types])
+        prompt = (
+            f"文本：{text}\n"
+            "【实体抽取】\n"
+            "实体类型列表（只能从下列类型选择，禁止原样输出列表本身）：\n"
+            f"{type_lines}\n\n"
+            "要求：实体必须是原文子串，不要改写；不存在则输出空列表。\n"
+            "仅输出 JSON，格式示例：{\"人物\":[\"张三\"],\"地点\":[\"北京\"]}\n"
+        )
+        if self.fewshot:
+            prompt += (
+                "\n示例（仅展示格式，不要照抄示例内容或类型）：\n"
+                "文本：张三在北京工作。\n"
+                "输出：{\"人物\":[\"张三\"],\"地点\":[\"北京\"]}\n"
+            )
+        return self.wrap_prompt(prompt)
+
+
 class REPromptBuilder(BasePromptBuilder):
     """RE 任务提示词构建器
     
@@ -161,6 +197,36 @@ class REPromptBuilder(BasePromptBuilder):
             f"根据关系列表抽取关系三元组，"
             f"按照json[{{'relation':'', 'head':'', 'tail':''}}, ]的格式输出。"
         )
+        return self.wrap_prompt(prompt)
+
+
+class GenericREPromptBuilder(BasePromptBuilder):
+    """通用 RE Prompt（少量 few-shot），输出 [{'relation','head','tail'}]"""
+
+    def __init__(self, fewshot: bool = True):
+        self.fewshot = fewshot
+
+    def build(self, text: str, schema: Optional[TBoxSchema] = None) -> str:
+        if schema and schema.relation_types:
+            relations = schema.relation_types
+        else:
+            relations = REPromptBuilder.DEFAULT_RELATION_TYPES
+
+        rel_lines = "\n".join([f"- {r}" for r in relations])
+        prompt = (
+            f"文本：{text}\n"
+            "【关系抽取】\n"
+            "关系列表（只能从下列关系中选择，禁止原样输出列表本身）：\n"
+            f"{rel_lines}\n\n"
+            "要求：head/tail 必须是原文子串；不存在则输出空列表。\n"
+            "仅输出 JSON，格式示例：[{\"relation\":\"位于\",\"head\":\"张三\",\"tail\":\"北京\"}]\n"
+        )
+        if self.fewshot:
+            prompt += (
+                "\n示例（仅展示格式，不要照抄示例内容或关系）：\n"
+                "文本：张三在北京工作。\n"
+                "输出：[{\"relation\":\"位于\",\"head\":\"张三\",\"tail\":\"北京\"}]\n"
+            )
         return self.wrap_prompt(prompt)
 
 
@@ -209,7 +275,12 @@ class PromptBuilderFactory:
     }
     
     @classmethod
-    def get_builder(cls, task_type: TaskType) -> BasePromptBuilder:
+    def get_builder(
+        cls,
+        task_type: TaskType,
+        style: PromptStyle = PromptStyle.DEFAULT,
+        fewshot: bool = True,
+    ) -> BasePromptBuilder:
         """获取指定任务类型的构建器
         
         Args:
@@ -221,6 +292,12 @@ class PromptBuilderFactory:
         Raises:
             ValueError: 不支持的任务类型
         """
+        if style == PromptStyle.GENERIC:
+            if task_type == TaskType.NER:
+                return GenericNERPromptBuilder(fewshot=fewshot)
+            if task_type == TaskType.RE:
+                return GenericREPromptBuilder(fewshot=fewshot)
+            # EE 暂不支持通用 Prompt，回退默认
         builder_class = cls._builders.get(task_type)
         if not builder_class:
             raise ValueError(f"不支持的任务类型: {task_type}")

@@ -13,6 +13,8 @@ set -e
 PORT=${1:-8000}
 HOST="0.0.0.0"
 MODEL_PATH="/hy-tmp/zjx/models/modelscope/wenge-research/yayi-uie"
+MAX_CONCURRENCY=${MAX_CONCURRENCY:-1}
+REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-300}
 
 # 设置 CUDA 环境
 export CUDA_VISIBLE_DEVICES=0,1,2
@@ -32,6 +34,8 @@ echo "=========================================="
 echo "模型路径: $MODEL_PATH"
 echo "服务地址: http://$HOST:$PORT"
 echo "API 文档: http://$HOST:$PORT/docs"
+echo "最大并发: $MAX_CONCURRENCY"
+echo "单请求超时: ${REQUEST_TIMEOUT}s"
 echo "=========================================="
 
 # 启动服务
@@ -39,4 +43,6 @@ cd "$PROJECT_ROOT"
 python -m scripts.p5.baseline.yayi_uie.api \
     --host "$HOST" \
     --port "$PORT" \
-    --model-path "$MODEL_PATH"
+    --model-path "$MODEL_PATH" \
+    --max-concurrency "$MAX_CONCURRENCY" \
+    --request-timeout "$REQUEST_TIMEOUT"

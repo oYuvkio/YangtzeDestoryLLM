@@ -20,7 +20,6 @@
 #   bash scripts/p5/ablation/run_ablation_experiments.sh all       # 运行全部（含 full）
 #   bash scripts/p5/ablation/run_ablation_experiments.sh ablation  # 只运行消融实验（跳过 full）
 # =============================================================================
-
 set -e  # 遇到错误立即退出
 
 # =============================================================================
@@ -48,20 +47,17 @@ fi
 # =============================================================================
 # 配置区域（根据需要修改）
 # =============================================================================
-#改
-MODEL="gpt-4o-mini"
-API_KEY="sk-SgzHNynm92rMPoR2cw33XQvBShqoa4JdD6qf2pMmmZ9VmZHh"
-BASE_URL="https://x666.me/v1/"
-OUTPUT_BASE="outputs/eval_models_hybrid/gpt/"
-
-#不改
 TEST_FILE="outputs/eval_models_hybrid/longcat/full/predictions.jsonl"
 TEXT_SOURCE="data/corpus_for_kg/filtered_ytz_corpus/light_pool_v2_dedup.jsonl"
 TBOX="outputs/kg_final/tbox_final.json"
+MODEL="qwen/qwen3-235b-a22b"
+BASE_URL="https://integrate.api.nvidia.com/v1"
+API_KEY="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"
 TEMPERATURE=0.1
 TOP_P=0.1
 FUZZY_THRESHOLD=0.75
-INTERVAL=10
+INTERVAL=1
+OUTPUT_BASE="outputs/eval_models_hybrid/qwen235b"
 
 # =============================================================================
 # 评测配置（默认沿用抽取配置）
@@ -70,7 +66,6 @@ RUN_EVAL=true
 RUN_COMPARE=true
 EVAL_TEST_FILE="${TEST_FILE}"
 EVAL_TBOX="${TBOX}"
-
 
 # =============================================================================
 # 创建输出目录

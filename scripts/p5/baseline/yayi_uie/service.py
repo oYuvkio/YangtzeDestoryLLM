@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from .config import ModelConfig
 from .model import ModelLoader
 from .parser import OutputParserFactory, ParseResult
-from .prompt import PromptBuilderFactory, TaskType, TBoxSchema
+from .prompt import PromptBuilderFactory, TaskType, TBoxSchema, PromptStyle
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,8 @@ class ExtractionRequest:
     task_type: TaskType
     doc_id: Optional[str] = None
     schema: Optional[TBoxSchema] = None
+    prompt_style: PromptStyle = PromptStyle.DEFAULT
+    fewshot: bool = True
 
 
 @dataclass
@@ -133,7 +135,11 @@ class ExtractionService:
         
         try:
             # 构建提示词
-            builder = PromptBuilderFactory.get_builder(request.task_type)
+            builder = PromptBuilderFactory.get_builder(
+                request.task_type,
+                style=request.prompt_style,
+                fewshot=request.fewshot,
+            )
             prompt = builder.build(request.text, request.schema)
             
             if self.verbose:
@@ -212,6 +218,8 @@ class ExtractionService:
         text: str,
         doc_id: Optional[str] = None,
         schema: Optional[TBoxSchema] = None,
+        prompt_style: PromptStyle = PromptStyle.DEFAULT,
+        fewshot: bool = True,
     ) -> Dict[str, ExtractionResponse]:
         """对同一文本执行所有任务类型的抽取
         
@@ -231,6 +239,8 @@ class ExtractionService:
                 task_type=task_type,
                 doc_id=doc_id,
                 schema=schema,
+                prompt_style=prompt_style,
+                fewshot=fewshot,
             )
             results[task_type.value] = self.extract(request)
         

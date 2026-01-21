@@ -29,9 +29,21 @@ set -e  # 遇到错误立即退出
 CONDA_ENV="YangtzeLLM"
 
 # 初始化 conda（支持在脚本中使用 conda activate）
+if [ -f "/home/zjx/miniconda3/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    . /home/zjx/miniconda3/etc/profile.d/conda.sh
+elif [ -f "/home/zjx/anaconda3/etc/profile.d/conda.sh" ]; then
+    # shellcheck disable=SC1091
+    . /home/zjx/anaconda3/etc/profile.d/conda.sh
+fi
+
+if command -v conda >/dev/null 2>&1; then
 eval "$(conda shell.bash hook)"
 conda activate "${CONDA_ENV}"
 echo "已激活 Conda 环境: ${CONDA_ENV}"
+else
+    echo "[WARN] conda 未找到，跳过环境激活"
+fi
 
 # =============================================================================
 # 配置区域（根据需要修改）
@@ -43,13 +55,21 @@ BASE_URL="https://api.siliconflow.cn/v1/"
 OUTPUT_BASE="outputs/eval_models_hybrid/qwen/"
 
 #不改
-TEST_FILE="outputs/eval_models/gold/merge_filted_2.jsonl"
+TEST_FILE="outputs/eval_models_hybrid/qwen235b/full/predictions.jsonl"
 TEXT_SOURCE="data/corpus_for_kg/filtered_ytz_corpus/light_pool_v2_dedup.jsonl"
 TBOX="outputs/kg_final/tbox_final.json"
 TEMPERATURE=0.1
 TOP_P=0.1
 FUZZY_THRESHOLD=0.75
 INTERVAL=5
+
+# =============================================================================
+# 评测配置（默认沿用抽取配置）
+# =============================================================================
+RUN_EVAL=true
+RUN_COMPARE=true
+EVAL_TEST_FILE="${TEST_FILE}"
+EVAL_TBOX="${TBOX}"
 
 
 # =============================================================================
@@ -152,28 +172,107 @@ run_ablation_only() {
 }
 
 # =============================================================================
+# 评测与对比
+# =============================================================================
+run_eval_variant() {
+    local variant="$1"
+    local pred_file="${OUTPUT_BASE}/${variant}/predictions.jsonl"
+    if [ ! -f "$pred_file" ]; then
+        echo "[WARN] ${variant} 预测文件不存在，跳过评测: ${pred_file}"
+        return
+    fi
+
+    echo "============================================================"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始评测: ${variant}"
+    echo "============================================================"
+    bash scripts/p5/run_single_model.sh \
+        --tbox "${EVAL_TBOX}" \
+        --test-file "${EVAL_TEST_FILE}" \
+        --pred-file "${pred_file}" \
+        --eval-only \
+        --output-base "${OUTPUT_BASE}/${variant}"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${variant} 评测完成"
+}
+
+run_compare() {
+    local models=("$@")
+    if [ "${#models[@]}" -eq 0 ]; then
+        return
+    fi
+
+    echo "============================================================"
+    echo "生成对比报告..."
+    echo "============================================================"
+    python scripts/p5/compare_models.py \
+        --input-dir "${OUTPUT_BASE}" \
+        --models "${models[*]}" \
+        --version raw \
+        --output "${OUTPUT_BASE}/comparison_report_raw.json"
+
+    python scripts/p5/compare_models.py \
+        --input-dir "${OUTPUT_BASE}" \
+        --models "${models[*]}" \
+        --version tbox_filtered \
+        --output "${OUTPUT_BASE}/comparison_report_tbox_filtered.json"
+}
+
+# =============================================================================
 # 主逻辑
 # =============================================================================
-EXPERIMENT="${1:-all}"
+EVAL_ONLY=false
+for arg in "$@"; do
+    if [ "$arg" = "--eval-only" ]; then
+        EVAL_ONLY=true
+    fi
+done
+
+if [[ "${1:-}" == --* || -z "${1:-}" ]]; then
+    EXPERIMENT="all"
+else
+    EXPERIMENT="$1"
+fi
+RAN_VARIANTS=()
+
+if [ "$EVAL_ONLY" = true ]; then
+    echo "[INFO] 仅评测模式：跳过抽取"
+fi
 
 case "${EXPERIMENT}" in
     full)
-        run_full
+        RAN_VARIANTS=("full")
+        if [ "$EVAL_ONLY" != true ]; then
+            run_full
+        fi
         ;;
     wo_cot)
-        run_wo_cot
+        RAN_VARIANTS=("wo_cot")
+        if [ "$EVAL_ONLY" != true ]; then
+            run_wo_cot
+        fi
         ;;
     wo_graph)
-        run_wo_graph
+        RAN_VARIANTS=("wo_graph")
+        if [ "$EVAL_ONLY" != true ]; then
+            run_wo_graph
+        fi
         ;;
     wo_verify)
-        run_wo_verify
+        RAN_VARIANTS=("wo_verify")
+        if [ "$EVAL_ONLY" != true ]; then
+            run_wo_verify
+        fi
         ;;
     all)
-        run_all
+        RAN_VARIANTS=("full" "wo_cot" "wo_graph" "wo_verify")
+        if [ "$EVAL_ONLY" != true ]; then
+            run_all
+        fi
         ;;
     ablation)
-        run_ablation_only
+        RAN_VARIANTS=("wo_cot" "wo_graph" "wo_verify")
+        if [ "$EVAL_ONLY" != true ]; then
+            run_ablation_only
+        fi
         ;;
     *)
         echo "未知实验: ${EXPERIMENT}"
@@ -181,3 +280,13 @@ case "${EXPERIMENT}" in
         exit 1
         ;;
 esac
+
+if [ "$RUN_EVAL" = true ]; then
+    for variant in "${RAN_VARIANTS[@]}"; do
+        run_eval_variant "$variant"
+    done
+fi
+
+if [ "$RUN_COMPARE" = true ]; then
+    run_compare "${RAN_VARIANTS[@]}"
+fi

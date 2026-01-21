@@ -54,12 +54,18 @@ def cmd_server(args):
         model_path=args.model_path,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
+        device_map=args.device_map,
+        cpu_max_memory=args.cpu_memory,
+        gpu_max_memory=args.gpu_memory,
+        offload_folder=args.offload_folder,
     )
     
     service_config = ServiceConfig(
         host=args.host,
         port=args.port,
         workers=args.workers,
+        max_concurrency=args.max_concurrency,
+        request_timeout=args.request_timeout,
         verbose=args.verbose,
     )
     
@@ -70,6 +76,7 @@ def cmd_batch(args):
     """批量抽取"""
     from scripts.p5.baseline.yayi_uie.config import ModelConfig
     from scripts.p5.baseline.yayi_uie.batch import run_batch_extraction
+    from scripts.p5.baseline.yayi_uie.prompt import PromptStyle
     
     model_config = ModelConfig(
         model_path=args.model_path,
@@ -88,6 +95,10 @@ def cmd_batch(args):
         skip_existing=args.skip_existing,
         verbose=args.verbose,
         interval=args.interval,
+        server_url=args.server_url,
+        http_timeout=args.http_timeout,
+        prompt_style=PromptStyle(args.prompt_style),
+        fewshot=not args.no_fewshot,
     )
 
 
@@ -113,9 +124,20 @@ def main():
     server_parser.add_argument("--host", default="0.0.0.0", help="监听地址")
     server_parser.add_argument("--port", type=int, default=8000, help="监听端口")
     server_parser.add_argument("--workers", type=int, default=1, help="工作进程数")
+    server_parser.add_argument("--max-concurrency", type=int, default=1, help="最大并发请求数")
+    server_parser.add_argument("--request-timeout", type=int, default=300, help="单请求超时秒数")
     server_parser.add_argument("--model-path", default="/hy-tmp/zjx/models/modelscope/wenge-research/yayi-uie")
     server_parser.add_argument("--max-new-tokens", type=int, default=2048)
     server_parser.add_argument("--temperature", type=float, default=0.0)
+    server_parser.add_argument(
+        "--device-map",
+        default="balanced_low_0",
+        choices=["auto", "balanced", "balanced_low_0", "sequential"],
+        help="device_map 策略 (默认: balanced_low_0)",
+    )
+    server_parser.add_argument("--cpu-memory", default="48GiB", help="CPU 最大内存上限 (默认: 48GiB)")
+    server_parser.add_argument("--gpu-memory", default="22GiB", help="每张 GPU 最大显存上限 (默认: 22GiB)")
+    server_parser.add_argument("--offload-folder", default="/hy-tmp/zjx/offload", help="权重/状态 offload 目录")
     
     # batch 子命令
     batch_parser = subparsers.add_parser("batch", help="批量抽取")
@@ -131,6 +153,14 @@ def main():
     batch_parser.add_argument("--limit", type=int, default=None)
     batch_parser.add_argument("--skip-existing", action="store_true")
     batch_parser.add_argument("--interval", type=float, default=0.0)
+    batch_parser.add_argument("--server-url", default=None,
+                              help="HTTP 服务地址（设置后通过服务抽取，例如 http://127.0.0.1:8000）")
+    batch_parser.add_argument("--http-timeout", type=int, default=180,
+                              help="HTTP 请求超时秒数 (默认: 180)")
+    batch_parser.add_argument("--prompt-style", choices=["default", "generic"], default="default",
+                              help="提示词风格：default（原版） / generic（通用+few-shot）")
+    batch_parser.add_argument("--no-fewshot", action="store_true",
+                              help="关闭通用 Prompt 的 few-shot 示例")
     
     # evaluate 子命令
     eval_parser = subparsers.add_parser("evaluate", help="评测")

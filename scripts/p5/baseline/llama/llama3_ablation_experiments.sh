@@ -27,7 +27,8 @@ set -e  # 遇到错误立即退出
 # 激活 Conda 环境
 # =============================================================================
 CONDA_ENV="YangtzeLLM"
-
+export LLM_REQUEST_MODE=post
+export LLM_DISABLE_RESPONSE_FORMAT=1
 # 初始化 conda（支持在脚本中使用 conda activate）
 if [ -f "/home/zjx/miniconda3/etc/profile.d/conda.sh" ]; then
     # shellcheck disable=SC1091
@@ -48,20 +49,18 @@ fi
 # =============================================================================
 # 配置区域（根据需要修改）
 # =============================================================================
-#改
-MODEL="gpt-4o-mini"
-API_KEY="sk-SgzHNynm92rMPoR2cw33XQvBShqoa4JdD6qf2pMmmZ9VmZHh"
-BASE_URL="https://x666.me/v1/"
-OUTPUT_BASE="outputs/eval_models_hybrid/gpt/"
-
-#不改
-TEST_FILE="outputs/eval_models_hybrid/longcat/full/predictions.jsonl"
+TEST_FILE="outputs/eval_models/gold/merge_filted_2.jsonl"
 TEXT_SOURCE="data/corpus_for_kg/filtered_ytz_corpus/light_pool_v2_dedup.jsonl"
 TBOX="outputs/kg_final/tbox_final.json"
+MODEL="meta/llama3-8b-instruct"
+BASE_URL="https://runanytime.hxi.me/v1/"
+API_KEY="sk-iLJ2tUK2wINNX3njF7XDXbC5kKHwbwdlo7nzVkaH0wToTP0P"
 TEMPERATURE=0.1
 TOP_P=0.1
+SUPPORTS_SAMPLING_PARAMS=true
 FUZZY_THRESHOLD=0.75
-INTERVAL=10
+INTERVAL=5
+OUTPUT_BASE="outputs/eval_models_hybrid/meta_llama3_8b_instruct"
 
 # =============================================================================
 # 评测配置（默认沿用抽取配置）
@@ -70,7 +69,6 @@ RUN_EVAL=true
 RUN_COMPARE=true
 EVAL_TEST_FILE="${TEST_FILE}"
 EVAL_TBOX="${TBOX}"
-
 
 # =============================================================================
 # 创建输出目录
@@ -87,13 +85,18 @@ COMMON_ARGS=(
     --model "${MODEL}"
     --base-url "${BASE_URL}"
     --api-key "${API_KEY}"
-    --temperature "${TEMPERATURE}"
-    --top-p "${TOP_P}"
     --fuzzy-threshold "${FUZZY_THRESHOLD}"
     --no-strict-schema
     --skip-existing
     --interval "${INTERVAL}"
 )
+
+if [ "${SUPPORTS_SAMPLING_PARAMS}" = true ]; then
+    COMMON_ARGS+=(
+        --temperature "${TEMPERATURE}"
+        --top-p "${TOP_P}"
+    )
+fi
 
 # =============================================================================
 # 实验函数

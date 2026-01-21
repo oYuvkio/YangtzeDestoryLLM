@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-UIE 基线抽取：基于 TBox 构造 schema，分任务评估（NER/RE/EE）。
+UIE PyTorch 抽取：基于 TBox 构造 schema，分任务评估（NER/RE）。
 
 说明：
-- 使用 PaddleNLP PP-UIE 模型（paddlenlp.Taskflow）。
+- 使用 UIE PyTorch 模型（transformers + trust_remote_code）。
 - 支持独立的 NER（实体识别）和 RE（关系抽取）任务。
 - 按 doc_id 流式写入 JSONL，避免中断丢结果。
 - 输出格式包含 entities、events、triples 字段，便于分任务评估。
@@ -13,20 +13,20 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from paddlenlp import Taskflow
+import torch
+from transformers import AutoModel, AutoTokenizer
 try:
     from dotenv import load_dotenv
 except Exception:
     load_dotenv = None
 
 # 添加项目根目录到 Python 路径，确保可导入 kg 包
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -38,7 +38,30 @@ from kg.utils.text_source import (
 )
 
 
-def setup_logger(log_file: str | None = None) -> logging.Logger:
+def _json_default(obj: Any) -> Any:
+    if isinstance(obj, torch.Tensor):
+        return obj.detach().cpu().tolist()
+    try:
+        import numpy as np  # type: ignore
+
+        if isinstance(obj, np.generic):
+            return obj.item()
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+    except Exception:
+        pass
+    return str(obj)
+
+
+def safe_json_preview(obj: Any, max_len: int = 1000) -> str:
+    try:
+        text = json.dumps(obj, ensure_ascii=False, default=_json_default)
+    except Exception as exc:
+        return f"<unserializable: {exc}>"
+    return text[:max_len]
+
+
+def setup_logger(log_file: str | None = None, verbose: bool = False) -> logging.Logger:
     log_format = "%(asctime)s | %(levelname)s | %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
     handlers = [logging.StreamHandler(sys.stdout)]
@@ -47,7 +70,7 @@ def setup_logger(log_file: str | None = None) -> logging.Logger:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.DEBUG if verbose else logging.INFO,
         format=log_format,
         datefmt=date_format,
         handlers=handlers,
@@ -412,40 +435,86 @@ def parse_uie_output(
     return events, triples
 
 
+def load_uie_model(model_path: str, precision: str) -> Tuple[Any, Any]:
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    dtype_map = {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }
+    torch_dtype = dtype_map.get(precision, torch.float16)
+    model = AutoModel.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+        torch_dtype=torch_dtype,
+    )
+    if torch.cuda.is_available():
+        model = model.to("cuda")
+    model.eval()
+    return model, tokenizer
+
+
+def uie_predict(model: Any, tokenizer: Any, text: str, schema: Any) -> Any:
+    if schema is None:
+        return model.predict(tokenizer, text)
+    try:
+        return model.predict(tokenizer, text, schema=schema)
+    except TypeError:
+        if hasattr(model, "set_schema"):
+            model.set_schema(schema)
+        return model.predict(tokenizer, text)
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="UIE Baseline 抽取（基于 TBox schema，支持 NER/RE 分任务评估）")
-    parser.add_argument("--model-name", default="paddlenlp/PP-UIE-0.5B", help="PP-UIE 模型名称 (paddlenlp/PP-UIE-0.5B, 1.5B, 7B, 14B)")
+    parser = argparse.ArgumentParser(description="UIE PyTorch 抽取（基于 TBox schema，支持 NER/RE 分任务评估）")
+    parser.add_argument("--model-path", default="/hy-tmp/zjx/models/modelscope/yjx123456/uie-pytorch-base",
+                        help="UIE PyTorch 模型路径")
+    parser.add_argument("--model-name", default=None, help="兼容参数（同 --model-path）")
     parser.add_argument("--tbox", required=True, help="TBox 路径（json）")
     parser.add_argument("--test-file", required=True, help="测试集文件（jsonl）")
     parser.add_argument("--output", "-o", required=True, help="输出预测文件（jsonl）")
     parser.add_argument("--limit", type=int, default=None, help="最多处理样本数")
     parser.add_argument("--skip-existing", action="store_true", help="跳过已存在的 doc_id")
     parser.add_argument("--precision", default="float16", help="模型精度 (float16/bfloat16/float32)")
-    parser.add_argument("--batch-size", type=int, default=1, help="批处理大小")
+    parser.add_argument("--batch-size", type=int, default=1, help="批处理大小（当前为兼容参数）")
     parser.add_argument("--interval", type=float, default=0.0, help="请求间隔秒数")
     parser.add_argument("--log-file", default="", help="日志文件（可选）")
     parser.add_argument("--text-source", type=str, default=None,
-        help="完整文本来源文件（可选，通过 doc_id/id 映射获取完整文本）")
-    parser.add_argument("--task", type=str, default="all", choices=["ner", "re", "all"],
-        help="任务类型：ner(仅实体识别), re(仅关系抽取), all(全部，默认)")
+                        help="完整文本来源文件（可选，通过 doc_id/id 映射获取完整文本）")
+    parser.add_argument("--task-type", "--task", dest="task_type", type=str, default="all",
+                        choices=["ner", "re", "all"],
+                        help="任务类型：ner(仅实体识别), re(仅关系抽取), all(全部，默认)")
+    parser.add_argument("--http-timeout", type=int, default=300, help="兼容参数（UIE 不使用）")
+    parser.add_argument("--max-new-tokens", type=int, default=2048, help="兼容参数（UIE 不使用）")
+    parser.add_argument("-v", "--verbose", action="store_true", help="详细日志")
     return parser.parse_args()
 
 
-def main() -> None:
-    if load_dotenv:
-        load_dotenv()
-    args = parse_args()
-    logger = setup_logger(args.log_file or None)
-
-    tbox_path = Path(args.tbox)
-    test_path = Path(args.test_file)
-    output_path = Path(args.output)
+def run_batch_extraction(
+    *,
+    model_path: str,
+    tbox_path: Path,
+    test_file: Path,
+    output_path: Path,
+    task_type: str,
+    text_source: str | None,
+    limit: int | None,
+    skip_existing: bool,
+    precision: str,
+    batch_size: int,
+    interval: float,
+    log_file: str | None,
+    verbose: bool,
+) -> None:
+    logger = setup_logger(log_file, verbose)
+    logger.info(f"任务类型: {task_type}")
+    logger.info(f"模型路径: {model_path}, 精度: {precision}, 批大小: {batch_size}")
 
     if not tbox_path.exists():
         logger.error(f"TBox 文件不存在: {tbox_path}")
         return
-    if not test_path.exists():
-        logger.error(f"测试集文件不存在: {test_path}")
+    if not test_file.exists():
+        logger.error(f"测试集文件不存在: {test_file}")
         return
 
     (
@@ -461,70 +530,40 @@ def main() -> None:
         relation_to_range_cn,
     ) = load_tbox_config(tbox_path)
 
-    # 根据任务类型构建不同的 schema
-    task = args.task
-    logger.info(f"任务类型: {task}")
-    logger.info(f"模型: {args.model_name}, 精度: {args.precision}, 批大小: {args.batch_size}")
+    use_ner = task_type in ("ner", "all")
+    use_re = task_type in ("re", "all")
 
-    ie_ner = None
-    ie_re = None
-
-    if task in ("ner", "all"):
-        ner_schema = ner_labels
+    if use_ner:
         logger.info(f"NER Schema: {len(ner_labels)} 个实体类型")
-        ie_ner = Taskflow(
-            'information_extraction',
-            schema=ner_schema,
-            schema_lang="zh",
-            batch_size=args.batch_size,
-            model=args.model_name,
-            precision=args.precision
-        )
-
-    if task in ("re", "all"):
-        # 使用嵌套 RE schema：{subject_type: [relation_labels]}
-        # 这样 UIE 可以根据 subject 类型抽取对应的关系
+    if use_re:
         if nested_re_schema:
-            re_schema = nested_re_schema
             logger.info(f"RE Schema (嵌套): {len(nested_re_schema)} 个 subject 类型")
-            for subj_cn, rels in list(nested_re_schema.items())[:3]:
-                logger.info(f"  - {subj_cn}: {rels[:3]}..." if len(rels) > 3 else f"  - {subj_cn}: {rels}")
         else:
-            # 回退到简单 schema
-            re_schema = {event_label: relation_labels}
             logger.info(f"RE Schema (简单): subject={event_label}, relations={len(relation_labels)}")
         logger.info(f"事件回退类型: {fallback_type}")
-        ie_re = Taskflow(
-            'information_extraction',
-            schema=re_schema,
-            schema_lang="zh",
-            batch_size=args.batch_size,
-            model=args.model_name,
-            precision=args.precision
-        )
 
-    samples = load_test_samples(test_path)
-    if args.limit:
-        samples = samples[:args.limit]
+    model, tokenizer = load_uie_model(model_path, precision)
+
+    samples = load_test_samples(test_file)
+    if limit:
+        samples = samples[:limit]
     logger.info(f"样本数: {len(samples)}")
 
-    # 加载完整文本映射（如果指定了 --text-source）
     text_lookup: Dict[str, str] = {}
-    if args.text_source:
-        logger.info(f"加载完整文本来源: {args.text_source}")
+    if text_source:
+        logger.info(f"加载完整文本来源: {text_source}")
         try:
-            # 优先使用 source_text 字段；若缺失再回退 text 字段
-            text_lookup = load_text_lookup(Path(args.text_source), text_field="source_text")
+            text_lookup = load_text_lookup(Path(text_source), text_field="source_text")
             if not text_lookup:
                 logger.info("  source_text 字段为空，回退到 text 字段")
-                text_lookup = load_text_lookup(Path(args.text_source), text_field="text")
+                text_lookup = load_text_lookup(Path(text_source), text_field="text")
         except FileNotFoundError as exc:
             logger.error(str(exc))
             return
         logger.info(f"已加载 {len(text_lookup)} 条完整文本")
 
     existing_predictions: Dict[str, Dict[str, Any]] = {}
-    if args.skip_existing and output_path.exists():
+    if skip_existing and output_path.exists():
         for line in output_path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line:
@@ -538,7 +577,7 @@ def main() -> None:
                 continue
         logger.info(f"已有预测: {len(existing_predictions)} 条")
 
-    write_mode = "a" if args.skip_existing and output_path.exists() else "w"
+    write_mode = "a" if skip_existing and output_path.exists() else "w"
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with output_path.open(write_mode, encoding="utf-8") as out_f:
@@ -548,7 +587,7 @@ def main() -> None:
                 sample,
                 doc_id,
                 text_lookup,
-                require_text_source=bool(args.text_source),
+                require_text_source=bool(text_source),
             )
             if doc_id in existing_predictions:
                 logger.info(f"[{idx}/{len(samples)}] {doc_id}: 跳过已存在")
@@ -578,20 +617,31 @@ def main() -> None:
             triples: List[Dict[str, Any]] = []
 
             try:
-                # NER 任务
-                if ie_ner is not None:
-                    ner_raw = ie_ner(source_text)
-                    logger.debug(f"[{idx}/{len(samples)}] {doc_id}: NER 原始输出: {json.dumps(ner_raw, ensure_ascii=False)[:1000]}")
+                if use_ner:
+                    ner_schema = ner_labels
+                    ner_raw = uie_predict(model, tokenizer, source_text, ner_schema)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            f"[{idx}/{len(samples)}] {doc_id}: NER 原始输出: "
+                            f"{safe_json_preview(ner_raw)}"
+                        )
                     ner_result = ner_raw
                     if isinstance(ner_result, list) and len(ner_result) > 0:
                         ner_result = ner_result[0]
                     entities = parse_ner_output(ner_result, label_to_entity_type)
                     logger.info(f"[{idx}/{len(samples)}] {doc_id}: NER 抽取实体 {len(entities)} 个")
 
-                # RE 任务
-                if ie_re is not None:
-                    re_raw = ie_re(source_text)
-                    logger.debug(f"[{idx}/{len(samples)}] {doc_id}: RE 原始输出: {json.dumps(re_raw, ensure_ascii=False)[:1000]}")
+                if use_re:
+                    if nested_re_schema:
+                        re_schema = nested_re_schema
+                    else:
+                        re_schema = {event_label: relation_labels}
+                    re_raw = uie_predict(model, tokenizer, source_text, re_schema)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            f"[{idx}/{len(samples)}] {doc_id}: RE 原始输出: "
+                            f"{safe_json_preview(re_raw)}"
+                        )
                     re_result = re_raw
                     if isinstance(re_result, list) and len(re_result) > 0:
                         re_result = re_result[0]
@@ -639,8 +689,33 @@ def main() -> None:
             out_f.flush()
             logger.info(f"[{idx}/{len(samples)}] {doc_id}: 总计 实体={len(entities)}, 事件={len(events)}, 三元组={len(triples)}")
 
-            if args.interval > 0 and idx < len(samples):
-                time.sleep(args.interval)
+            if interval > 0 and idx < len(samples):
+                time.sleep(interval)
+
+
+def main() -> None:
+    if load_dotenv:
+        load_dotenv()
+    args = parse_args()
+    model_path = args.model_path
+    if args.model_name:
+        model_path = args.model_name
+
+    run_batch_extraction(
+        model_path=model_path,
+        tbox_path=Path(args.tbox),
+        test_file=Path(args.test_file),
+        output_path=Path(args.output),
+        task_type=args.task_type,
+        text_source=args.text_source,
+        limit=args.limit,
+        skip_existing=args.skip_existing,
+        precision=args.precision,
+        batch_size=args.batch_size,
+        interval=args.interval,
+        log_file=args.log_file or None,
+        verbose=args.verbose,
+    )
 
 
 if __name__ == "__main__":

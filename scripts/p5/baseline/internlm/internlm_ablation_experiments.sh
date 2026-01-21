@@ -154,26 +154,54 @@ run_ablation_only() {
 # =============================================================================
 # 主逻辑
 # =============================================================================
-EXPERIMENT="${1:-all}"
+EVAL_ONLY=false
+for arg in "$@"; do
+    if [ "$arg" = "--eval-only" ]; then
+        EVAL_ONLY=true
+    fi
+done
+
+if [[ "${1:-}" == --* || -z "${1:-}" ]]; then
+    EXPERIMENT="all"
+else
+    EXPERIMENT="$1"
+fi
+RAN_VARIANTS=()
+
+if [ "$EVAL_ONLY" = true ]; then
+    echo "[INFO] 仅评测模式：跳过抽取"
+fi
 
 case "${EXPERIMENT}" in
     full)
-        run_full
+        if [ "$EVAL_ONLY" != true ]; then
+            run_full
+        fi
         ;;
     wo_cot)
-        run_wo_cot
+        if [ "$EVAL_ONLY" != true ]; then
+            run_wo_cot
+        fi
         ;;
     wo_graph)
-        run_wo_graph
+        if [ "$EVAL_ONLY" != true ]; then
+            run_wo_graph
+        fi
         ;;
     wo_verify)
-        run_wo_verify
+        if [ "$EVAL_ONLY" != true ]; then
+            run_wo_verify
+        fi
         ;;
     all)
-        run_all
+        if [ "$EVAL_ONLY" != true ]; then
+            run_all
+        fi
         ;;
     ablation)
-        run_ablation_only
+        if [ "$EVAL_ONLY" != true ]; then
+            run_ablation_only
+        fi
         ;;
     *)
         echo "未知实验: ${EXPERIMENT}"

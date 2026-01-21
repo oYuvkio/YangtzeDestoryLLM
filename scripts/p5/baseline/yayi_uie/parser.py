@@ -174,7 +174,7 @@ class NEROutputParser(BaseOutputParser):
     def parse(self, raw_output: str) -> ParseResult:
         """解析 NER 输出"""
         try:
-            json_str = self._extract_json(raw_output)
+            json_str = self._extract_json_object(raw_output)
             if not json_str:
                 return ParseResult(
                     success=False,
@@ -238,6 +238,45 @@ class NEROutputParser(BaseOutputParser):
                 raw_output=raw_output,
                 error=str(e),
             )
+
+    def _extract_json_object(self, text: str) -> Optional[str]:
+        """NER 优先提取 JSON 对象，避免误截取内部列表。"""
+        if not text:
+            return None
+
+        def find_balanced(s: str, open_char: str, close_char: str) -> Optional[str]:
+            start = s.find(open_char)
+            if start == -1:
+                return None
+
+            depth = 0
+            in_string = False
+            escape = False
+
+            for i, c in enumerate(s[start:], start):
+                if escape:
+                    escape = False
+                    continue
+                if c == '\\':
+                    escape = True
+                    continue
+                if c == '"' and not escape:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if c == open_char:
+                    depth += 1
+                elif c == close_char:
+                    depth -= 1
+                    if depth == 0:
+                        return s[start:i + 1]
+            return None
+
+        obj_json = find_balanced(text, '{', '}')
+        if obj_json:
+            return obj_json
+        return self._extract_json(text)
 
 
 class REOutputParser(BaseOutputParser):
