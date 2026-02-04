@@ -1,0 +1,424 @@
+{
+  "_description": "实体同义词库：用于评估时的实体归一化匹配",
+  "_usage": "在评估时，如果实体A在同义词列表中，则可以匹配到规范名",
+  "_pipeline_order": "本配置在关系映射之后、方向归一化之前使用",
+  "human_factors": {
+    "canonical": "人类活动",
+    "synonyms": [
+      "人为因素",
+      "人类因素",
+      "人为活动",
+      "人为干扰",
+      "人类干预",
+      "人为原因",
+      "人类的活动",
+      "人類活動"
+    ]
+  },
+  "climate_change": {
+    "canonical": "气候变化",
+    "synonyms": [
+      "气候异常",
+      "气候波动",
+      "气候变迁",
+      "气候变异",
+      "气候改变",
+      "气候的变化"
+    ]
+  },
+  "yangtze_delta": {
+    "canonical": "长江三角洲",
+    "synonyms": [
+      "长江三角洲地区",
+      "长三角",
+      "长三角地区"
+    ]
+  },
+  "yangtze_basin": {
+    "canonical": "长江流域",
+    "synonyms": [
+      "长江水系",
+      "长江干流流域",
+      "長江流域",
+      "长江水域",
+      "长江流域内",
+      "中国长江流域",
+      "长江流域地区"
+    ]
+  },
+  "middle_lower_yangtze": {
+    "canonical": "长江中下游",
+    "synonyms": [
+      "长江中下游地区",
+      "长江中下游流域",
+      "中下游地区",
+      "中下游",
+      "长江下游",
+      "长江下游地区",
+      "长江中下游一带",
+      "长江流域的中下游地区",
+      "长江流域中下游",
+      "長江下游",
+      "长江流域中下游地区",
+      "长江干流中下游",
+      "长江中下游区域",
+      "长江中游下段",
+      "长江干线中下游",
+      "中国长江中下游地区",
+      "长江中下游沿线",
+      "长江中游或下游",
+      "长江的中下游",
+      "长江的中下游地区"
+    ]
+  },
+  "flood": {
+    "canonical": "洪水",
+    "synonyms": [
+      "洪涝",
+      "洪灾",
+      "大水",
+      "水灾",
+      "涝灾",
+      "洪患",
+      "洪涝灾害",
+      "洪水灾害"
+    ]
+  },
+  "drought": {
+    "canonical": "干旱",
+    "synonyms": [
+      "旱灾",
+      "旱情",
+      "大旱",
+      "奇旱",
+      "伏旱",
+      "春旱",
+      "秋旱",
+      "冬旱",
+      "干旱灾害",
+      "冬干"
+    ]
+  },
+  "heavy_rain": {
+    "canonical": "暴雨",
+    "synonyms": [
+      "强降雨",
+      "大暴雨",
+      "特大暴雨",
+      "强降水",
+      "强降雨过程"
+    ]
+  },
+  "el_nino": {
+    "canonical": "厄尔尼诺",
+    "synonyms": [
+      "El Nino",
+      "El Niño",
+      "厄尔尼诺现象",
+      "厄尔尼诺事件"
+    ]
+  },
+  "warm_humid_climate": {
+    "canonical": "暖湿气候",
+    "synonyms": [
+      "暖湿的气候",
+      "温暖湿润气候",
+      "暖湿期",
+      "气候暖湿"
+    ]
+  },
+  "dongting_lake": {
+    "canonical": "洞庭湖",
+    "synonyms": [
+      "洞庭湖区",
+      "洞庭湖流域",
+      "洞庭湖水系",
+      "洞庭湖地区"
+    ]
+  },
+  "poyang_lake": {
+    "canonical": "鄱阳湖",
+    "synonyms": [
+      "鄱阳湖区",
+      "鄱阳湖流域",
+      "鄱阳湖水系",
+      "鄱阳湖地区",
+      "江西鄱阳湖"
+    ]
+  },
+  "three_gorges": {
+    "canonical": "三峡",
+    "synonyms": [
+      "长江三峡",
+      "三峡地区",
+      "三峡库区"
+    ]
+  },
+  "disaster_impact": {
+    "canonical": "灾害损失",
+    "synonyms": [
+      "灾情",
+      "损失",
+      "灾损",
+      "灾害造成的损失",
+      "受灾损失",
+      "灾害的损失"
+    ]
+  },
+  "emergency_response": {
+    "canonical": "应急响应",
+    "synonyms": [
+      "应急预案",
+      "应急处置",
+      "抗灾响应",
+      "防汛响应",
+      "抗旱响应"
+    ]
+  },
+  "secondary_disaster": {
+    "canonical": "次生灾害",
+    "synonyms": [
+      "次生灾害的发生"
+    ]
+  },
+  "urban_waterlogging": {
+    "canonical": "城市内涝",
+    "synonyms": [
+      "内涝",
+      "城市积水",
+      "城区积水",
+      "市区内涝",
+      "城市洪涝",
+      "城市内涝灾害",
+      "城市严重内涝",
+      "城市暴雨内涝",
+      "严重城市内涝",
+      "城区内涝",
+      "城市内涝多发",
+      "城市内涝频发"
+    ]
+  },
+  "taihu_lake": {
+    "canonical": "太湖",
+    "synonyms": [
+      "太湖流域",
+      "太湖水系",
+      "太湖地区"
+    ]
+  },
+  "hanjiang_river": {
+    "canonical": "汉江",
+    "synonyms": [
+      "汉江流域",
+      "汉江水系",
+      "汉水"
+    ]
+  },
+  "jialing_river": {
+    "canonical": "嘉陵江",
+    "synonyms": [
+      "嘉陵江流域",
+      "嘉陵江水系"
+    ]
+  },
+  "hydrological_station": {
+    "canonical": "水文站",
+    "synonyms": [
+      "测站",
+      "水文站点",
+      "专用水文站"
+    ]
+  },
+  "flood_control_project": {
+    "canonical": "防洪工程",
+    "synonyms": [
+      "防洪设施",
+      "防洪体系",
+      "防洪系统",
+      "防洪工程建设",
+      "防洪蓄洪工程",
+      "防洪排涝工程",
+      "防洪减灾工程",
+      "建设防洪工程",
+      "防洪抗旱工程",
+      "蓄洪、防洪工程"
+    ]
+  },
+  "reservoir": {
+    "canonical": "水库",
+    "synonyms": [
+      "蓄水库"
+    ]
+  },
+  "water_bureau": {
+    "canonical": "水文局",
+    "synonyms": [
+      "省水文局",
+      "市水文局",
+      "县水文局"
+    ]
+  },
+  "water_infrastructure_weak": {
+    "canonical": "水利设施薄弱",
+    "synonyms": [
+      "水利基础设施薄弱",
+      "水利基础设施不完善",
+      "水利设施老化",
+      "水利设施薄弱环节",
+      "水利设施脆弱",
+      "水利基础设施仍然薄弱",
+      "水利设施少"
+    ]
+  },
+  "jianghan_plain": {
+    "canonical": "江汉平原",
+    "synonyms": [
+      "江汉平原区",
+      "江汉地区",
+      "汉江平原",
+      "江汉平原地区"
+    ]
+  },
+  "south_water_north": {
+    "canonical": "南水北调",
+    "synonyms": [
+      "南水北调工程",
+      "南水北调中线工程",
+      "南水北调中线一期工程",
+      "南水北调东线工程",
+      "南水北调调水"
+    ]
+  },
+  "warm_humid_airflow": {
+    "canonical": "西南暖湿气流",
+    "synonyms": [
+      "强盛西南暖湿气流",
+      "暖湿气流",
+      "西南气流",
+      "低空西南暖湿气流"
+    ]
+  },
+  "chongqing_wushan": {
+    "canonical": "重庆市巫山县",
+    "synonyms": [
+      "重庆市巫山县城",
+      "巫山县",
+      "巫山",
+      "四川省巫山县"
+    ]
+  },
+  "anhui_south": {
+    "canonical": "安徽南部",
+    "synonyms": [
+      "皖南",
+      "安徽西南部",
+      "安徽东南部",
+      "安徽省南部",
+      "安徽南部地区",
+      "安徽中南部",
+      "安徽的南部",
+      "安徽中部南部"
+    ]
+  },
+  "sichuan_east": {
+    "canonical": "四川东部",
+    "synonyms": [
+      "川东",
+      "四川东南部",
+      "四川东北部",
+      "四川省中东部",
+      "四川中部东部",
+      "四川省东部",
+      "四川中东部",
+      "四川省东部地区"
+    ]
+  },
+  "guangdong_north": {
+    "canonical": "广东北部",
+    "synonyms": [
+      "粤北",
+      "广东中北部",
+      "广东西北部",
+      "广东东北部"
+    ]
+  },
+  "hunan_north": {
+    "canonical": "湖南北部",
+    "synonyms": [
+      "湘北",
+      "湖南东北部",
+      "湖南西北部",
+      "湖南中北部",
+      "湖南省北部",
+      "湖南的北部地区",
+      "湖南的北部"
+    ]
+  },
+  "hubei_east": {
+    "canonical": "湖北东部",
+    "synonyms": [
+      "鄂东",
+      "湖北省东部",
+      "湖北东北部",
+      "湖北东南部",
+      "湖北的东部地区",
+      "湖北中东部"
+    ]
+  },
+  "jiangxi_north": {
+    "canonical": "江西北部",
+    "synonyms": [
+      "赣北",
+      "江西省北部",
+      "江西中北部",
+      "江西西北部",
+      "江西省北部区域",
+      "江西东北部",
+      "江西的北部",
+      "江西北部地区"
+    ]
+  },
+  "songzi_levee": {
+    "canonical": "松滋江堤",
+    "synonyms": [
+      "松滋江堤沿线"
+    ]
+  },
+  "chuhe_river": {
+    "canonical": "滁河",
+    "synonyms": [
+      "滁河流域",
+      "滁河水系"
+    ]
+  },
+  "chuhe_station": {
+    "canonical": "滁河一级站闸",
+    "synonyms": [
+      "调度滁河一级站闸"
+    ]
+  },
+  "_auto_expand": {
+    "source_inputs": [
+      "outputs/eval_models_hybrid/qwen/qwen2.5-7b-instruct/full/predictions.jsonl",
+      "outputs/eval_models_hybrid/qwen/qwen3-235b-a22b/full/predictions.jsonl",
+      "outputs/eval_models_hybrid/qwen/qwen3-8b_0/full/predictions.jsonl",
+      "outputs/eval_models_hybrid/qwen/qwen3-8b_1/full/predictions.jsonl",
+      "outputs/eval_models_hybrid/qwen/qwen3-8b_merged/full/predictions.jsonl",
+      "outputs/eval_models_hybrid/qwen/qwq-32b/full/predictions.jsonl",
+      "outputs/eval_models_hybrid/google/gemini-2.5-flash/full/predictions.jsonl",
+      "outputs/eval_models_hybrid/google/gemini-flash-latest/full/predictions.jsonl",
+      "outputs/eval_models_hybrid/google/gemma-2-27b-it/full/predictions.jsonl",
+      "outputs/eval_models_hybrid/google/gemma-2-9b-it/full/predictions.jsonl"
+    ],
+    "mode": "embedding",
+    "threshold": 0.92,
+    "top_k": 1,
+    "ngram_min": 2,
+    "ngram_max": 4,
+    "min_len": 2,
+    "added_synonyms": 104,
+    "removed_by_review": 27,
+    "embedding_model": "BAAI/bge-base-zh-v1.5",
+    "embedding_device": "cuda"
+  }
+}

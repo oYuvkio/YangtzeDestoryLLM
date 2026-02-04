@@ -143,49 +143,51 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def fmt_metric(value: Any, width: int = 8) -> str:
+    def fmt_metric(value: Any) -> str:
         if value is None:
-            return f"{'N/A':>{width}}"
+            return "N/A"
         try:
-            return f"{float(value):>{width}.4f}"
+            return f"{float(value):.4f}"
         except (TypeError, ValueError):
-            return f"{'N/A':>{width}}"
+            return "N/A"
 
-    # 打印对比表格
+    # 打印对比表格（横向）
     print()
     print("=" * 80)
     print(f"评测结果对比（版本: {metrics_version}）")
     print("=" * 80)
-    print()
-    print(
-        f"{'模型':<20} {'Entity':>8} {'Rel(S)':>8} {'Rel(R)':>8} "
-        f"{'Event':>8} {'Halluc':>8} {'TBox':>8}"
-    )
-    print("-" * 80)
-
+    headers = ["模型", "Entity", "Rel(S)", "Rel(R)", "Event", "Halluc", "TBox"]
+    rows: List[List[str]] = []
     for r in results:
-        print(
-            f"{r['model']:<20} "
-            f"{fmt_metric(r.get('entity_f1'))} "
-            f"{fmt_metric(r.get('relation_f1_strict'))} "
-            f"{fmt_metric(r.get('relation_f1_relaxed'))} "
-            f"{fmt_metric(r.get('event_f1'))} "
-            f"{fmt_metric(r.get('hallucination_rate'))} "
-            f"{fmt_metric(r.get('tbox_consistency'))}"
+        rows.append(
+            [
+                r.get("model", ""),
+                fmt_metric(r.get("entity_f1")),
+                fmt_metric(r.get("relation_f1_strict")),
+                fmt_metric(r.get("relation_f1_relaxed")),
+                fmt_metric(r.get("event_f1")),
+                fmt_metric(r.get("hallucination_rate")),
+                fmt_metric(r.get("tbox_consistency")),
+            ]
         )
 
-    print("-" * 80)
-    print()
+    if rows:
+        widths = [max(len(h), max(len(row[i]) for row in rows)) for i, h in enumerate(headers)]
+        print(" ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+        print("-".join("-" * w for w in widths))
+        for row in rows:
+            print(" ".join(row[i].ljust(widths[i]) for i in range(len(headers))))
+        print()
 
     if results:
         best = results[0]
         print(f"最佳模型: {best['model']}")
-        print(f"  Entity F1: {fmt_metric(best.get('entity_f1'), width=0).strip()}")
-        print(f"  Relation F1 (Strict): {fmt_metric(best.get('relation_f1_strict'), width=0).strip()}")
-        print(f"  Relation F1 (Relaxed): {fmt_metric(best.get('relation_f1_relaxed'), width=0).strip()}")
-        print(f"  Event F1: {fmt_metric(best.get('event_f1'), width=0).strip()}")
-        print(f"  Hallucination Rate: {fmt_metric(best.get('hallucination_rate'), width=0).strip()}")
-        print(f"  TBox Consistency: {fmt_metric(best.get('tbox_consistency'), width=0).strip()}")
+        print(f"  Entity F1: {fmt_metric(best.get('entity_f1'))}")
+        print(f"  Relation F1 (Strict): {fmt_metric(best.get('relation_f1_strict'))}")
+        print(f"  Relation F1 (Relaxed): {fmt_metric(best.get('relation_f1_relaxed'))}")
+        print(f"  Event F1: {fmt_metric(best.get('event_f1'))}")
+        print(f"  Hallucination Rate: {fmt_metric(best.get('hallucination_rate'))}")
+        print(f"  TBox Consistency: {fmt_metric(best.get('tbox_consistency'))}")
         print()
 
     print(f"报告已保存: {output_path}")

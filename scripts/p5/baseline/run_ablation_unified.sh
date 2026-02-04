@@ -23,6 +23,9 @@
 
 set -e
 
+# 禁用 HTTP/HTTPS 代理
+unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+
 # =============================================================================
 # Conda 环境
 # =============================================================================
@@ -64,7 +67,7 @@ INTERVAL=3
 
 RUN_EVAL=true
 RUN_COMPARE=true
-EVAL_TEST_FILE=""
+EVAL_TEST_FILES=()
 EVAL_TBOX=""
 
 NO_STRICT_SCHEMA=true
@@ -77,6 +80,10 @@ ALLOW_SYSTEM_ROLE=""
 EXTRA_BODY=""
 WORKER_COUNT=""
 WORKER_ID=""
+ENABLE_ENTITY_NORMALIZE=false
+FILTER_ERRORS=true
+NO_TBOX_FILTER=false
+ENTITY_SYNONYMS=""
 
 print_help() {
     cat <<'EOF'
@@ -98,7 +105,7 @@ experiment:
   --top-p           Top-P
   --fuzzy-threshold 模糊匹配阈值
   --interval        请求间隔秒数
-  --eval-test-file  评测用的 gold/test 文件
+  --eval-test-file  评测用的 gold/test 文件（可多次传入或逗号分隔）
   --eval-tbox       评测用的 tbox 文件
   --eval-only       仅评测（默认包含 compare）
   --no-eval         不评测
@@ -107,6 +114,10 @@ experiment:
   --no-skip-existing 关闭 skip-existing
   --no-sampling-params 不传 temperature/top-p
   --allow-system-role 是否启用 system role（true/false）
+  --enable-entity-normalize 启用实体同义词归一化（评测阶段）
+  --no-error-filter 评测阶段不过滤 error 行（对比原始抽取）
+  --no-tbox-filter  不计算 TBox 过滤后版本（仅输出 raw 指标）
+  --entity-synonyms 实体同义词库路径（评测阶段）
   --extra-body      额外请求体 JSON（传给 run_extraction_on_test.py）
   --worker          worker 总数（启用多进程分片）
   --id              当前 worker 编号（从 0 开始）
@@ -173,7 +184,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --eval-test-file)
-            EVAL_TEST_FILE="$2"
+            IFS=',' read -r -a eval_parts <<< "$2"
+            for part in "${eval_parts[@]}"; do
+                if [ -n "$part" ]; then
+                    EVAL_TEST_FILES+=("$part")
+                fi
+            done
             shift 2
             ;;
         --eval-tbox)
@@ -208,6 +224,22 @@ while [[ $# -gt 0 ]]; do
             ALLOW_SYSTEM_ROLE="$2"
             shift 2
             ;;
+        --enable-entity-normalize)
+            ENABLE_ENTITY_NORMALIZE=true
+            shift
+            ;;
+        --no-error-filter)
+            FILTER_ERRORS=false
+            shift
+            ;;
+        --no-tbox-filter)
+            NO_TBOX_FILTER=true
+            shift
+            ;;
+        --entity-synonyms)
+            ENTITY_SYNONYMS="$2"
+            shift 2
+            ;;
         --extra-body|--extra_body)
             EXTRA_BODY="$2"
             shift 2
@@ -237,8 +269,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [ -z "$EVAL_TEST_FILE" ]; then
-    EVAL_TEST_FILE="${TEST_FILE}"
+if [ "${#EVAL_TEST_FILES[@]}" -eq 0 ]; then
+    EVAL_TEST_FILES=("${TEST_FILE}")
 fi
 if [ -z "$EVAL_TBOX" ]; then
     EVAL_TBOX="${TBOX}"
@@ -389,16 +421,41 @@ run_eval_variant() {
         return
     fi
 
-    echo "============================================================"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始评测: ${variant}"
-    echo "============================================================"
-    bash scripts/p5/run_single_model.sh \
-        --tbox "${EVAL_TBOX}" \
-        --test-file "${EVAL_TEST_FILE}" \
-        --pred-file "${pred_file}" \
-        --eval-only \
-        --output-base "${OUTPUT_BASE}/${variant}"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${variant} 评测完成"
+    local eval_args=()
+    if [ "$ENABLE_ENTITY_NORMALIZE" = true ]; then
+        eval_args+=(--enable-entity-normalize)
+    fi
+    if [ "$FILTER_ERRORS" = false ]; then
+        eval_args+=(--no-error-filter)
+    fi
+    if [ "$NO_TBOX_FILTER" = true ]; then
+        eval_args+=(--no-tbox-filter)
+    fi
+    if [ -n "$ENTITY_SYNONYMS" ]; then
+        eval_args+=(--entity-synonyms "$ENTITY_SYNONYMS")
+    fi
+
+    local total_eval="${#EVAL_TEST_FILES[@]}"
+    for eval_file in "${EVAL_TEST_FILES[@]}"; do
+        local eval_name
+        eval_name="$(basename "$eval_file")"
+        eval_name="${eval_name%.*}"
+        local out_base="${OUTPUT_BASE}/${variant}"
+        if [ "$total_eval" -gt 1 ]; then
+            out_base="${OUTPUT_BASE}/${variant}/eval_${eval_name}"
+        fi
+        echo "============================================================"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始评测: ${variant} (gold=${eval_file})"
+        echo "============================================================"
+        bash scripts/p5/run_single_model.sh \
+            --tbox "${EVAL_TBOX}" \
+            --test-file "${eval_file}" \
+            --pred-file "${pred_file}" \
+            --eval-only \
+            --output-base "${out_base}" \
+            "${eval_args[@]}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ${variant} 评测完成: ${eval_file}"
+    done
 }
 
 run_compare() {
@@ -416,11 +473,86 @@ run_compare() {
         --version raw \
         --output "${OUTPUT_BASE}/comparison_report_raw.json"
 
-    python scripts/p5/compare_models.py \
-        --input-dir "${OUTPUT_BASE}" \
-        --models "${models[*]}" \
-        --version tbox_filtered \
-        --output "${OUTPUT_BASE}/comparison_report_tbox_filtered.json"
+    if [ "$NO_TBOX_FILTER" = false ]; then
+        python scripts/p5/compare_models.py \
+            --input-dir "${OUTPUT_BASE}" \
+            --models "${models[*]}" \
+            --version tbox_filtered \
+            --output "${OUTPUT_BASE}/comparison_report_tbox_filtered.json"
+    else
+        echo "[INFO] 已开启 --no-tbox-filter，跳过 tbox_filtered 对比报告"
+    fi
+}
+
+# =============================================================================
+# 多 gold 汇总（横向表格）
+# =============================================================================
+print_multi_eval_summary() {
+    python3 - <<'PY'
+import json
+from pathlib import Path
+
+output_base = Path("""'"$OUTPUT_BASE"'""")
+variants = """'"${RAN_VARIANTS[*]}"'""".split()
+eval_files = """'"${EVAL_TEST_FILES[*]}"'""".split()
+
+def fmt(v):
+    return "N/A" if v is None else f"{v:.4f}"
+
+def load_metrics(path: Path):
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+def row(version, m, eval_name):
+    return [
+        eval_name,
+        version,
+        fmt(m.get("event_f1")),
+        fmt(m.get("triple_f1_strict")),
+        fmt(m.get("triple_f1_relaxed")),
+        fmt(m.get("entity_f1")),
+        fmt(m.get("entity_f1_with_type")),
+        fmt(m.get("relation_f1")),
+        fmt(m.get("hallucination_rate")),
+        fmt(m.get("tbox_consistency")),
+    ]
+
+headers = ["Gold", "Version", "EventF1", "TriS", "TriR", "EntF1", "EntF1+T", "RelF1", "Halluc", "TBox"]
+
+def print_table(title, rows):
+    if not rows:
+        return
+    widths = [max(len(h), max(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
+    print("")
+    print(title)
+    print(" ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+    print("-".join("-" * w for w in widths))
+    for r in rows:
+        print(" ".join(r[i].ljust(widths[i]) for i in range(len(headers))))
+
+for variant in variants:
+    rows = []
+    for eval_file in eval_files:
+        eval_name = Path(eval_file).stem
+        base_dir = output_base / variant / f"eval_{eval_name}"
+        metrics_path = base_dir / "metrics.json"
+        metrics_no_tbox = base_dir / "metrics_no_tbox.json"
+
+        data = load_metrics(metrics_path) or {}
+        if "raw" in data:
+            rows.append(row("raw", data["raw"], eval_name))
+        else:
+            rows.append(row("raw", data, eval_name))
+        if "tbox_filtered" in data:
+            rows.append(row("tbox_filtered", data["tbox_filtered"], eval_name))
+
+        nt = load_metrics(metrics_no_tbox)
+        if isinstance(nt, dict):
+            rows.append(row("raw_only", nt, eval_name))
+
+    print_table(f"[{variant}] 多 Gold 评测汇总", rows)
+PY
 }
 
 # =============================================================================
@@ -483,5 +615,10 @@ if [ "$RUN_EVAL" = true ]; then
 fi
 
 if [ "$RUN_COMPARE" = true ]; then
-    run_compare "${RAN_VARIANTS[@]}"
+    if [ "${#EVAL_TEST_FILES[@]}" -gt 1 ]; then
+        echo "[INFO] 检测到多个 --eval-test-file，跳过 compare（输出已分目录）"
+        print_multi_eval_summary
+    else
+        run_compare "${RAN_VARIANTS[@]}"
+    fi
 fi

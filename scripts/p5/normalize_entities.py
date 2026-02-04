@@ -75,7 +75,10 @@ def normalize_entity(entity: str, synonym_map: Dict[str, str]) -> str:
     Returns:
         归一化后的实体名（如果没找到映射则返回原名）
     """
-    entity_lower = entity.lower().strip()
+    if entity is None:
+        return ""
+    entity_text = str(entity)
+    entity_lower = entity_text.lower().strip()
 
     # 1. 精确匹配
     if entity_lower in synonym_map:
@@ -88,7 +91,7 @@ def normalize_entity(entity: str, synonym_map: Dict[str, str]) -> str:
             if abs(len(syn) - len(entity_lower)) <= 3:
                 return canonical
 
-    return entity
+    return entity_text
 
 
 def normalize_triple(triple: Dict[str, Any], synonym_map: Dict[str, str]) -> Dict[str, Any]:

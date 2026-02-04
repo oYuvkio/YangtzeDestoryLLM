@@ -1607,6 +1607,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="启用 TBox 类型回退（默认关闭，与 --use-original-type 互斥）",
     )
+    parser.add_argument(
+        "--no-tbox-filter",
+        action="store_true",
+        help="不计算 TBox 过滤后版本（仅输出 raw 指标）",
+    )
     parser.add_argument("--out", required=True, help="输出指标 JSON 路径")
     parser.add_argument("--log-file", default="", help="日志文件（可选）")
     return parser.parse_args()
@@ -1777,25 +1782,29 @@ def main() -> None:
         )
         report_raw["version"] = "raw"
 
-        # 版本2：TBox 过滤后
-        logging.info("[ABox] 计算 TBox 过滤后指标（tbox_filtered）...")
-        gold_filtered = [_filter_by_tbox(g, tbox) for g in gold[:pair_count]]
-        preds_filtered = [_filter_by_tbox(p, tbox) for p in preds[:pair_count]]
-        report_filtered = _compute_aggregated_report(
-            preds_filtered,
-            gold_filtered,
-            tbox,
-            time_tolerance_days=args.time_tolerance_days,
-            geo_synonyms=args.geo_syn,
-            use_original_type=use_original_type,
-        )
-        report_filtered["version"] = "tbox_filtered"
+        if args.no_tbox_filter:
+            report_raw["no_tbox_filter"] = True
+            report = report_raw
+        else:
+            # 版本2：TBox 过滤后
+            logging.info("[ABox] 计算 TBox 过滤后指标（tbox_filtered）...")
+            gold_filtered = [_filter_by_tbox(g, tbox) for g in gold[:pair_count]]
+            preds_filtered = [_filter_by_tbox(p, tbox) for p in preds[:pair_count]]
+            report_filtered = _compute_aggregated_report(
+                preds_filtered,
+                gold_filtered,
+                tbox,
+                time_tolerance_days=args.time_tolerance_days,
+                geo_synonyms=args.geo_syn,
+                use_original_type=use_original_type,
+            )
+            report_filtered["version"] = "tbox_filtered"
 
-        # 合并输出
-        report = {
-            "raw": report_raw,
-            "tbox_filtered": report_filtered,
-        }
+            # 合并输出
+            report = {
+                "raw": report_raw,
+                "tbox_filtered": report_filtered,
+            }
     else:
         # 单条记录模式
         report_raw = compute_full_metrics(
@@ -1808,22 +1817,26 @@ def main() -> None:
         )
         report_raw["version"] = "raw"
 
-        preds_filtered = _filter_by_tbox(preds, tbox)
-        gold_filtered = _filter_by_tbox(gold, tbox)
-        report_filtered = compute_full_metrics(
-            preds_filtered,
-            gold_filtered,
-            tbox,
-            time_tolerance_days=args.time_tolerance_days,
-            geo_synonyms=args.geo_syn,
-            use_original_type=use_original_type,
-        )
-        report_filtered["version"] = "tbox_filtered"
+        if args.no_tbox_filter:
+            report_raw["no_tbox_filter"] = True
+            report = report_raw
+        else:
+            preds_filtered = _filter_by_tbox(preds, tbox)
+            gold_filtered = _filter_by_tbox(gold, tbox)
+            report_filtered = compute_full_metrics(
+                preds_filtered,
+                gold_filtered,
+                tbox,
+                time_tolerance_days=args.time_tolerance_days,
+                geo_synonyms=args.geo_syn,
+                use_original_type=use_original_type,
+            )
+            report_filtered["version"] = "tbox_filtered"
 
-        report = {
-            "raw": report_raw,
-            "tbox_filtered": report_filtered,
-        }
+            report = {
+                "raw": report_raw,
+                "tbox_filtered": report_filtered,
+            }
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
